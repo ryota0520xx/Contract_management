@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>新規契約登録 | Contract Admin</title>
+    <link rel="preconnect" href="https://cdn.tailwindcss.com" />
+    <link rel="preconnect" href="https://unpkg.com" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js" defer></script>
+    <style>
+      [v-cloak] {
+        display: none;
+      }
+      body {
+        font-family: "Inter", system-ui, -apple-system, sans-serif;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-100 text-slate-800 antialiased">
+    <div id="app" v-cloak>
+      <nav
+        class="bg-gradient-to-r from-blue-900 via-blue-800 to-indigo-900 text-white shadow-xl px-8 py-4 mb-10 border-b border-white/10"
+      >
+        <div class="max-w-3xl mx-auto flex justify-between items-center">
+          <h1 class="text-2xl font-bold tracking-tight drop-shadow-sm">
+            契約管理くん
+          </h1>
+          <a
+            href="/"
+            class="text-sm font-bold text-blue-100 hover:text-white transition bg-white/10 hover:bg-white/20 px-4 py-2 rounded-full"
+            >一覧に戻る</a
+          >
+        </div>
+      </nav>
+
+      <main class="max-w-3xl mx-auto px-4">
+        <div
+          class="bg-white p-8 rounded-2xl shadow-xl border border-slate-200/60"
+        >
+          <h2 class="text-xl font-bold mb-6 border-l-4 border-blue-600 pl-3">
+            新規契約登録
+          </h2>
+
+          <div class="space-y-6">
+            <div>
+              <label class="block text-sm font-medium text-slate-600 mb-1"
+                >保存先フォルダ</label
+              >
+              <select
+                v-model="newContract.folder_id"
+                class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition bg-white"
+              >
+                <option :value="null">未分類 (ルート)</option>
+                <option v-for="f in flatFolders" :key="f.id" :value="f.id">
+                  {{ '- '.repeat(f.level) + f.name }}
+                </option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-slate-600 mb-1"
+                >契約タイトル</label
+              >
+              <input
+                v-model="newContract.title"
+                type="text"
+                class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+                placeholder="例：システム開発委託契約"
+              />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-slate-600 mb-1"
+                >顧客名</label
+              >
+              <input
+                v-model="newContract.client_name"
+                type="text"
+                class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+                placeholder="例：株式会社テックリード"
+              />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-slate-600 mb-1"
+                >契約金額</label
+              >
+              <input
+                v-model.number="newContract.amount"
+                type="number"
+                class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+                placeholder="0"
+              />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-slate-600 mb-1"
+                >契約締結日</label
+              >
+              <input
+                v-model="newContract.contract_date"
+                type="date"
+                class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+              />
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label class="block text-sm font-medium text-slate-600 mb-1"
+                  >契約開始日</label
+                >
+                <input
+                  v-model="newContract.start_date"
+                  type="date"
+                  class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+                />
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-slate-600 mb-1"
+                  >契約終了日</label
+                >
+                <input
+                  v-model="newContract.end_date"
+                  type="date"
+                  class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+                />
+              </div>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-slate-600 mb-1"
+                >契約要約</label
+              >
+              <textarea
+                v-model="newContract.summary"
+                class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+                rows="3"
+                placeholder="AI解析で自動入力されますが、手動で編集も可能です"
+              ></textarea>
+            </div>
+            <div class="flex items-center pt-2">
+              <input
+                v-model="newContract.auto_renewal"
+                id="auto_renewal"
+                type="checkbox"
+                class="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500"
+              />
+              <label
+                for="auto_renewal"
+                class="ml-2 text-sm font-medium text-slate-600"
+                >自動更新あり</label
+              >
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-slate-600 mb-1"
+                >契約書 (PDF)</label
+              >
+              <input
+                type="file"
+                accept="application/pdf"
+                ref="fileInputRef"
+                @change="handleFileChange"
+                class="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+              />
+              <p
+                v-if="isAnalyzing"
+                class="mt-2 text-sm text-blue-600 font-bold animate-pulse"
+              >
+                AIが契約書を解析中...
+              </p>
+            </div>
+            <div class="pt-4">
+              <button
+                @click="addContract"
+                class="w-full bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white font-bold py-3 rounded-lg shadow-lg hover:shadow-xl transition-all active:transform active:scale-95"
+              >
+                契約を登録する
+              </button>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        const { createApp, ref, onMounted, computed } = Vue;
+        createApp({
+          setup() {
+            const newContract = ref({
+              title: "",
+              client_name: "",
+              amount: 0,
+              contract_date: "",
+              start_date: "",
+              end_date: "",
+              auto_renewal: false,
+              summary: "",
+              folder_id: null,
+            });
+            const pdfFile = ref(null);
+            const fileInputRef = ref(null);
+            const isAnalyzing = ref(false);
+            const folders = ref([]);
+
+            const fetchFolders = async () => {
+              try {
+                const res = await fetch("/folders");
+                if (res.ok) {
+                  folders.value = await res.json();
+                }
+              } catch (error) {
+                console.error("Error fetching folders:", error);
+              }
+            };
+
+            const flatFolders = computed(() => {
+              const result = [];
+              const traverse = (nodes, level = 0) => {
+                if (!nodes) return;
+                for (const node of nodes) {
+                  result.push({ ...node, level });
+                  if (node.children) traverse(node.children, level + 1);
+                }
+              };
+              traverse(folders.value);
+              return result;
+            });
+
+            const analyzePdf = async (file) => {
+              if (!file) return;
+              isAnalyzing.value = true;
+
+              const formData = new FormData();
+              formData.append("pdf", file);
+
+              try {
+                const res = await fetch("/api/analyze", {
+                  method: "POST",
+                  body: formData,
+                });
+
+                if (res.ok) {
+                  const data = await res.json();
+                  if (data.title) newContract.value.title = data.title;
+                  if (data.client_name)
+                    newContract.value.client_name = data.client_name;
+                  if (data.amount) newContract.value.amount = data.amount;
+                  if (data.contract_date)
+                    newContract.value.contract_date = data.contract_date;
+                  if (data.start_date)
+                    newContract.value.start_date = data.start_date;
+                  if (data.end_date) newContract.value.end_date = data.end_date;
+                  if (typeof data.auto_renewal === "boolean")
+                    newContract.value.auto_renewal = data.auto_renewal;
+                  if (data.summary) newContract.value.summary = data.summary;
+                }
+              } catch (e) {
+                console.error("AI解析エラー:", e);
+              } finally {
+                isAnalyzing.value = false;
+              }
+            };
+
+            const handleFileChange = (e) => {
+              pdfFile.value = e.target.files[0] || null;
+              if (pdfFile.value) analyzePdf(pdfFile.value);
+            };
+
+            const addContract = async () => {
+              const formData = new FormData();
+              formData.append("title", newContract.value.title);
+              formData.append("client_name", newContract.value.client_name);
+              formData.append("amount", newContract.value.amount);
+              formData.append("contract_date", newContract.value.contract_date);
+              formData.append("start_date", newContract.value.start_date);
+              formData.append("end_date", newContract.value.end_date);
+              formData.append("auto_renewal", newContract.value.auto_renewal);
+              formData.append("summary", newContract.value.summary);
+              if (newContract.value.folder_id) {
+                formData.append("folder_id", newContract.value.folder_id);
+              }
+              if (pdfFile.value) formData.append("pdf", pdfFile.value);
+
+              await fetch("/contracts", { method: "POST", body: formData });
+              alert("登録しました");
+              window.location.href = "/"; // 一覧へ戻る
+            };
+
+            onMounted(fetchFolders);
+
+            return {
+              newContract,
+              addContract,
+              handleFileChange,
+              fileInputRef,
+              isAnalyzing,
+              flatFolders,
+            };
+          },
+        }).mount("#app");
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,10 @@
+### ID 1 のデータを削除する（IDが違う場合は数字を変えてください）
+post http://localhost:8080/contracts/
+Content-Type: application/json
+
+{
+    "title": "契約内容を変更しました",
+    "client_name": "新しい顧客名",
+    "end_date":"22025/12/31"
+}
+

@@ -1,0 +1,1466 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Contract Admin | 契約管理システム</title>
+    <link rel="preconnect" href="https://cdn.tailwindcss.com" />
+    <link rel="preconnect" href="https://unpkg.com" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js" defer></script>
+    <style>
+      [v-cloak] {
+        display: none;
+      } /* 読み込み時のチラつき防止 */
+      body {
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      }
+      .resizer {
+        position: absolute;
+        right: 0;
+        top: 0;
+        bottom: 0;
+        margin: auto;
+        width: 4px;
+        height: 60%;
+        cursor: col-resize;
+        user-select: none;
+        touch-action: none;
+        z-index: 10;
+        background-color: #cbd5e1;
+        border-radius: 2px;
+        transition: all 0.2s;
+      }
+      .resizer:hover, .resizing {
+        background-color: #3b82f6;
+        width: 6px;
+      }
+    </style>
+    <!-- フォルダツリー用テンプレート -->
+    <script type="text/x-template" id="folder-item-template">
+      <li>
+        <div 
+          class="flex items-center justify-between px-2 py-1.5 rounded-md cursor-pointer text-sm transition-colors group mb-0.5"
+          :class="selectedId === model.id ? 'bg-blue-50 text-blue-700 font-bold shadow-sm ring-1 ring-blue-100' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'"
+          @click="$emit('select', model.id)"
+        >
+          <div class="flex items-center gap-2 overflow-hidden w-full">
+            <!-- 開閉ボタン -->
+            <button 
+              v-if="model.children && model.children.length" 
+              @click.stop="isOpen = !isOpen"
+              class="p-0.5 hover:bg-slate-200 rounded text-slate-400 flex-shrink-0"
+            >
+              <svg class="w-3 h-3 transition-transform duration-200" :class="isOpen ? 'rotate-90' : ''" fill="currentColor" viewBox="0 0 20 20"><path d="M6 6L14 10L6 14V6Z" /></svg>
+            </button>
+            <span v-else class="w-4 flex-shrink-0"></span>
+            
+            <!-- アイコン -->
+            <svg class="w-4 h-4 flex-shrink-0" :class="selectedId === model.id ? 'text-blue-500' : 'text-yellow-400'" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
+            
+            <!-- 名前表示 / 編集フォーム -->
+            <div v-if="isEditing" class="flex-1 min-w-0" @click.stop>
+              <input 
+                ref="nameInput"
+                v-model="editName" 
+                @blur="finishEdit" 
+                @keydown.enter="finishEdit"
+                @keydown.esc="cancelEdit"
+                class="w-full px-1 py-0.5 text-sm border border-blue-500 rounded focus:outline-none bg-white text-slate-900"
+              />
+            </div>
+            <span v-else class="truncate select-none flex-1" @dblclick.stop="startEdit" title="ダブルクリックで名前を変更">{{ model.name }}</span>
+          </div>
+          
+          <!-- 操作ボタン群 (ホバー時のみ表示) -->
+          <div class="flex items-center opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2" v-if="!isEditing">
+            <!-- 編集ボタン -->
+            <button 
+              @click.stop="startEdit"
+              class="p-1 text-slate-400 hover:text-blue-500 transition-colors mr-0.5"
+              title="名前を変更"
+            >
+              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- 子要素 -->
+        <ul v-if="isOpen && model.children && model.children.length" class="pl-4 border-l border-slate-200 ml-2">
+          <folder-item 
+            v-for="child in model.children" 
+            :key="child.id" 
+            :model="child" 
+            :selected-id="selectedId"
+            @select="$emit('select', $event)"
+            @delete="$emit('delete', $event)"
+            @rename="$emit('rename', $event)"
+          ></folder-item>
+        </ul>
+      </li>
+    </script>
+  </head>
+  <body class="bg-slate-100 text-slate-800 antialiased h-screen overflow-hidden">
+    <div id="app" v-cloak class="h-full flex flex-col">
+      <nav class="bg-gradient-to-r from-blue-900 via-blue-800 to-indigo-900 text-white shadow-xl px-6 py-4 flex-shrink-0 z-20 border-b border-white/10">
+        <div class="flex justify-between items-center">
+          <div class="flex items-center gap-4">
+            <button @click="isSidebarOpen = !isSidebarOpen" class="p-1.5 hover:bg-white/10 rounded-lg transition text-blue-100 hover:text-white">
+              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+            </button>
+            <h1 class="text-xl font-bold tracking-tight text-white drop-shadow-sm">契約管理くん</h1>
+          </div>
+          <button
+            @click="openModal"
+            class="bg-blue-500 hover:bg-blue-400 text-white px-5 py-2 rounded-full font-bold text-sm transition-all shadow-lg hover:shadow-blue-500/30 active:scale-95 border border-blue-400/50"
+          >
+            + 新規契約登録
+          </button>
+        </div>
+      </nav>
+
+      <div class="flex flex-1 overflow-hidden">
+        <!-- サイドバー (フォルダツリー) -->
+        <aside 
+          class="bg-white border-r border-slate-200 flex flex-col transition-all duration-300 ease-in-out overflow-hidden"
+          :class="isSidebarOpen ? 'w-64' : 'w-0 opacity-0'"
+        >
+          <div class="p-4 border-b border-slate-100 flex justify-between items-center bg-white">
+            <h2 class="font-bold text-slate-800 text-sm tracking-wide">フォルダ</h2>
+            <button @click="openFolderModal" class="text-slate-400 hover:text-blue-600 hover:bg-blue-50 p-1.5 rounded-md transition" title="フォルダ作成">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+            </button>
+          </div>
+          
+          <div class="flex-1 overflow-y-auto p-3">
+            <ul class="space-y-0.5">
+              <!-- 全ての契約 -->
+              <li>
+                <div 
+                  class="flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer text-sm transition-colors mb-0.5"
+                  :class="currentFolderId === null ? 'bg-blue-50 text-blue-700 font-bold shadow-sm ring-1 ring-blue-100' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'"
+                  @click="selectFolder(null)"
+                >
+                  <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                  全ての契約
+                </div>
+              </li>
+              <!-- 未分類 -->
+              <li>
+                <div 
+                  class="flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer text-sm transition-colors mb-2"
+                  :class="currentFolderId === 0 ? 'bg-blue-50 text-blue-700 font-bold shadow-sm ring-1 ring-blue-100' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'"
+                  @click="selectFolder(0)"
+                >
+                  <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                  未分類
+                </div>
+              </li>
+
+              <!-- フォルダツリー -->
+              <folder-item 
+                v-for="folder in folderTree" 
+                :key="folder.id" 
+                :model="folder" 
+                :selected-id="currentFolderId"
+                @select="selectFolder"
+                @delete="deleteFolder"
+                @rename="renameFolder"
+              ></folder-item>
+            </ul>
+          </div>
+        </aside>
+
+        <!-- メインコンテンツ -->
+        <main class="flex-1 overflow-y-auto bg-slate-100 p-6">
+          <div class="flex justify-between items-end mb-4">
+            <div class="flex items-center gap-3">
+              <h2 class="text-2xl font-bold text-slate-800 tracking-tight">
+                <span v-if="currentFolderId === null">全ての契約</span>
+                <span v-else-if="currentFolderId === 0">未分類の契約</span>
+                <span v-else>{{ getFolderName(currentFolderId) }}</span>
+              </h2>
+              <span class="bg-white text-slate-600 text-xs px-2.5 py-1 rounded-full font-bold shadow-sm border border-slate-200">{{ contracts.length }}</span>
+            </div>
+            
+            <!-- 検索フィルター (簡易) -->
+            <div class="flex gap-2">
+              <input 
+                type="text" 
+                placeholder="契約名で検索..." 
+                class="px-4 py-2 text-sm border border-slate-300 rounded-full focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-sm w-64 transition-all focus:w-72"
+                @input="e => filterText = e.target.value"
+                @keydown.enter="fetchContracts"
+              >
+            </div>
+          </div>
+
+          <!-- 一括操作バー -->
+          <div v-if="selectedContractIds.length > 0" class="bg-white border border-blue-200 rounded-xl px-4 py-3 mb-4 flex justify-between items-center shadow-lg shadow-blue-100 animate-pulse-once">
+            <div class="flex items-center gap-3">
+              <span class="font-bold text-blue-800 text-sm">{{ selectedContractIds.length }}件を選択中</span>
+              <button @click="selectedContractIds = []" class="text-xs text-blue-600 hover:underline">選択解除</button>
+            </div>
+            <div class="flex gap-2">
+              <button @click="openMoveModal" class="bg-white border border-blue-300 text-blue-700 hover:bg-blue-50 px-3 py-1.5 rounded-lg text-sm font-bold transition shadow-sm">フォルダ移動</button>
+              <button @click="bulkDelete" class="bg-white border border-red-300 text-red-600 hover:bg-red-50 px-3 py-1.5 rounded-lg text-sm font-bold transition shadow-sm">削除</button>
+            </div>
+          </div>
+
+          <div
+            class="bg-white rounded-2xl shadow-xl border border-slate-200/60 overflow-hidden"
+          >
+            <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-slate-200">
+              <thead class="bg-slate-50 border-b border-slate-200">
+                <tr>
+                  <th
+                    scope="col"
+                    class="px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap w-4"
+                  >
+                    <input type="checkbox" v-model="isAllSelected" class="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500">
+                  </th>
+                  <th
+                    scope="col"
+                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                  >
+                    契約名
+                    <div class="resizer" @mousedown.stop="startResize"></div>
+                  </th>
+                  <th
+                    scope="col"
+                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                  >
+                    フォルダ
+                    <div class="resizer" @mousedown.stop="startResize"></div>
+                  </th>
+                  <th
+                    scope="col"
+                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                  >
+                    顧客名
+                    <div class="resizer" @mousedown.stop="startResize"></div>
+                  </th>
+                  <th
+                    scope="col"
+                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                  >
+                    金額
+                    <div class="resizer" @mousedown.stop="startResize"></div>
+                  </th>
+                  <th
+                    scope="col"
+                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                  >
+                    締結日
+                    <div class="resizer" @mousedown.stop="startResize"></div>
+                  </th>
+                  <th
+                    scope="col"
+                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                  >
+                    契約開始日
+                    <div class="resizer" @mousedown.stop="startResize"></div>
+                  </th>
+                  <th
+                    scope="col"
+                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                  >
+                    契約終了日
+                    <div class="resizer" @mousedown.stop="startResize"></div>
+                  </th>
+                  <th
+                    scope="col"
+                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                  >
+                    要約
+                    <div class="resizer" @mousedown.stop="startResize"></div>
+                  </th>
+                  <th
+                    scope="col"
+                    class="px-6 py-2 text-right text-sm font-bold text-slate-700 whitespace-nowrap"
+                  >
+                    操作
+                  </th>
+                </tr>
+              </thead>
+              <tbody class="bg-white divide-y divide-slate-200">
+                <!-- スケルトンローディング -->
+                <tr v-if="isLoading" v-for="n in 5" :key="'skeleton-'+n" class="animate-pulse">
+                  <td class="px-6 py-4 whitespace-nowrap w-4"><div class="h-4 w-4 bg-slate-200 rounded"></div></td>
+                  <td class="px-6 py-4 whitespace-nowrap"><div class="h-4 w-48 bg-slate-200 rounded"></div></td>
+                  <td class="px-6 py-4 whitespace-nowrap"><div class="h-4 w-24 bg-slate-200 rounded"></div></td>
+                  <td class="px-6 py-4 whitespace-nowrap"><div class="h-4 w-32 bg-slate-200 rounded"></div></td>
+                  <td class="px-6 py-4 whitespace-nowrap"><div class="h-4 w-20 bg-slate-200 rounded"></div></td>
+                  <td class="px-6 py-4 whitespace-nowrap"><div class="h-4 w-24 bg-slate-200 rounded"></div></td>
+                  <td class="px-6 py-4 whitespace-nowrap"><div class="h-4 w-24 bg-slate-200 rounded"></div></td>
+                  <td class="px-6 py-4 whitespace-nowrap"><div class="h-4 w-24 bg-slate-200 rounded"></div></td>
+                  <td class="px-6 py-4 whitespace-nowrap"><div class="h-4 w-64 bg-slate-200 rounded"></div></td>
+                  <td class="px-6 py-4 whitespace-nowrap text-right"><div class="h-8 w-16 bg-slate-200 rounded ml-auto"></div></td>
+                </tr>
+                <template v-else>
+                <tr
+                  v-for="c in contracts"
+                  :key="c.id"
+                  class="transition"
+                  :class="getRowClass(c)"
+                >
+                  <!-- チェックボックス -->
+                  <td class="px-6 py-2 whitespace-nowrap w-4" @click.stop>
+                    <input type="checkbox" :value="c.id" v-model="selectedContractIds" class="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500">
+                  </td>
+
+                  <!-- タイトル -->
+                  <td
+                    class="px-6 py-2 whitespace-nowrap cursor-pointer group"
+                    @click="startEditing(c, 'title')"
+                  >
+                    <div v-if="isEditing(c.id, 'title')">
+                      <input
+                        :id="`input-${c.id}-title`"
+                        v-model="editForm.title"
+                        type="text"
+                        class="w-full min-w-[200px] px-2 py-1.5 text-sm border border-blue-500 rounded focus:ring-2 focus:ring-blue-200 focus:outline-none shadow-sm"
+                        placeholder="契約タイトル"
+                        @blur="saveCell"
+                        @keydown.enter="saveCell"
+                        @keydown.esc.stop="cancelEditing"
+                        @click.stop
+                      />
+                    </div>
+                    <div v-else class="flex items-center gap-2">
+                      <div class="text-sm font-bold text-slate-900">
+                        <a
+                          :href="`/contract_detail.html?id=${c.id}`"
+                          target="_blank"
+                          class="hover:text-blue-600 hover:underline"
+                          @click.stop
+                          >{{ c.title || '(名称未設定)' }}</a
+                        >
+                      </div>
+                      <svg
+                        class="w-3 h-3 text-slate-300 opacity-0 group-hover:opacity-100 transition flex-shrink-0"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                        ></path>
+                      </svg>
+                    </div>
+                  </td>
+
+                  <!-- フォルダ -->
+                  <td class="px-6 py-2 whitespace-nowrap text-sm text-slate-500">
+                    <div class="flex items-center gap-1">
+                      <svg v-if="c.folder_id" class="w-4 h-4 text-yellow-400" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
+                      <span v-else class="text-slate-300">-</span>
+                      {{ getFolderName(c.folder_id) || '-' }}
+                    </div>
+                  </td>
+
+                  <!-- 顧客名 -->
+                  <td
+                    class="px-6 py-2 whitespace-nowrap cursor-pointer group"
+                    @click="startEditing(c, 'client_name')"
+                  >
+                    <div v-if="isEditing(c.id, 'client_name')">
+                      <input
+                        :id="`input-${c.id}-client_name`"
+                        v-model="editForm.client_name"
+                        type="text"
+                        class="w-full min-w-[160px] px-2 py-1.5 text-sm border border-blue-500 rounded focus:ring-2 focus:ring-blue-200 focus:outline-none shadow-sm"
+                        placeholder="顧客名"
+                        @blur="saveCell"
+                        @keydown.enter="saveCell"
+                        @keydown.esc.stop="cancelEditing"
+                        @click.stop
+                      />
+                    </div>
+                    <div v-else class="flex items-center gap-2">
+                      <div class="text-sm text-slate-600">
+                        {{ c.client_name || '-' }}
+                      </div>
+                      <svg
+                        class="w-3 h-3 text-slate-300 opacity-0 group-hover:opacity-100 transition flex-shrink-0"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                        ></path>
+                      </svg>
+                    </div>
+                  </td>
+
+                  <!-- 金額 -->
+                  <td
+                    class="px-6 py-2 whitespace-nowrap cursor-pointer group"
+                    @click="startEditing(c, 'amount')"
+                  >
+                    <div v-if="isEditing(c.id, 'amount')">
+                      <input
+                        :id="`input-${c.id}-amount`"
+                        v-model.number="editForm.amount"
+                        type="number"
+                        class="w-28 px-2 py-1.5 text-sm border border-blue-500 rounded focus:ring-2 focus:ring-blue-200 focus:outline-none shadow-sm"
+                        @blur="saveCell"
+                        @keydown.enter="saveCell"
+                        @keydown.esc.stop="cancelEditing"
+                        @click.stop
+                      />
+                    </div>
+                    <div
+                      v-else
+                      class="text-sm text-blue-600 font-semibold flex items-center gap-2"
+                    >
+                      ¥{{ c.amount?.toLocaleString() }}
+                      <svg
+                        class="w-3 h-3 text-slate-300 opacity-0 group-hover:opacity-100 transition"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                        ></path>
+                      </svg>
+                    </div>
+                  </td>
+
+                  <!-- 締結日 -->
+                  <td
+                    class="px-6 py-2 whitespace-nowrap cursor-pointer group"
+                    @click="startEditing(c, 'contract_date')"
+                  >
+                    <div v-if="isEditing(c.id, 'contract_date')">
+                      <input
+                        :id="`input-${c.id}-contract_date`"
+                        v-model="editForm.contract_date"
+                        type="date"
+                        class="w-full min-w-[130px] px-2 py-1.5 text-sm border border-blue-500 rounded focus:ring-2 focus:ring-blue-200 focus:outline-none shadow-sm"
+                        @blur="saveCell"
+                        @keydown.enter="saveCell"
+                        @keydown.esc.stop="cancelEditing"
+                        @click.stop
+                      />
+                    </div>
+                    <div
+                      v-else
+                      class="text-sm text-slate-500 flex items-center gap-2"
+                    >
+                      {{ c.contract_date || '-' }}
+                      <svg
+                        class="w-3 h-3 text-slate-300 opacity-0 group-hover:opacity-100 transition"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                        ></path>
+                      </svg>
+                    </div>
+                  </td>
+
+                  <!-- 開始日 -->
+                  <td
+                    class="px-6 py-2 whitespace-nowrap cursor-pointer group"
+                    @click="startEditing(c, 'start_date')"
+                  >
+                    <div v-if="isEditing(c.id, 'start_date')">
+                      <input
+                        :id="`input-${c.id}-start_date`"
+                        v-model="editForm.start_date"
+                        type="date"
+                        class="w-full min-w-[130px] px-2 py-1.5 text-sm border border-blue-500 rounded focus:ring-2 focus:ring-blue-200 focus:outline-none shadow-sm"
+                        @blur="saveCell"
+                        @keydown.enter="saveCell"
+                        @keydown.esc.stop="cancelEditing"
+                        @click.stop
+                      />
+                    </div>
+                    <div
+                      v-else
+                      class="text-sm text-slate-500 flex items-center gap-2"
+                    >
+                      {{ c.start_date || '-' }}
+                      <svg
+                        class="w-3 h-3 text-slate-300 opacity-0 group-hover:opacity-100 transition"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                        ></path>
+                      </svg>
+                    </div>
+                  </td>
+
+                  <!-- 終了日 -->
+                  <td
+                    class="px-6 py-2 whitespace-nowrap cursor-pointer group"
+                    @click="startEditing(c, 'end_date')"
+                  >
+                    <div v-if="isEditing(c.id, 'end_date')">
+                      <input
+                        :id="`input-${c.id}-end_date`"
+                        v-model="editForm.end_date"
+                        type="date"
+                        class="w-full min-w-[130px] px-2 py-1.5 text-sm border border-blue-500 rounded focus:ring-2 focus:ring-blue-200 focus:outline-none shadow-sm"
+                        @blur="saveCell"
+                        @keydown.enter="saveCell"
+                        @keydown.esc.stop="cancelEditing"
+                        @click.stop
+                      />
+                    </div>
+                    <div
+                      v-else
+                      class="text-sm text-slate-500 flex items-center gap-2"
+                    >
+                      {{ c.end_date || '-' }}
+                      <svg
+                        class="w-3 h-3 text-slate-300 opacity-0 group-hover:opacity-100 transition"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                        ></path>
+                      </svg>
+                    </div>
+                  </td>
+
+                  <!-- 要約 -->
+                  <td
+                    class="px-6 py-2 cursor-pointer group"
+                    @click="startEditing(c, 'summary')"
+                  >
+                    <div v-if="isEditing(c.id, 'summary')">
+                      <textarea
+                        :id="`input-${c.id}-summary`"
+                        v-model="editForm.summary"
+                        class="w-full min-w-[200px] px-2 py-1.5 text-sm border border-blue-500 rounded focus:ring-2 focus:ring-blue-200 focus:outline-none shadow-sm"
+                        rows="3"
+                        @blur="saveCell"
+                        @click.stop
+                      ></textarea>
+                    </div>
+                    <div
+                      v-else
+                      class="text-sm text-slate-500 max-w-xs truncate"
+                      :title="c.summary"
+                    >
+                      {{ c.summary || '-' }}
+                    </div>
+                  </td>
+
+                  <!-- 操作 -->
+                  <td
+                    class="px-6 py-2 whitespace-nowrap text-right text-sm font-medium"
+                  >
+                    <button
+                      @click.stop="deleteContract(c.id)"
+                      class="text-red-500 hover:text-red-700 hover:bg-red-50 px-3 py-1 rounded transition"
+                    >
+                      削除
+                    </button>
+                  </td>
+                </tr>
+                <tr v-if="contracts.length === 0">
+                  <td colspan="10" class="px-6 py-10 text-center text-slate-500">
+                    登録された契約はありません
+                  </td>
+                </tr>
+                </template>
+              </tbody>
+            </table>
+            </div>
+          </div>
+        </main>
+      </main>
+
+      <!-- 新規登録モーダル -->
+      <div
+        v-if="showModal"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 transition-all"
+        @click.self="closeModal"
+      >
+        <div
+          class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden transform transition-all scale-100"
+        >
+          <div
+            class="p-6 border-b border-slate-100 flex justify-between items-center"
+          >
+            <h2
+              class="text-xl font-bold text-slate-800 border-l-4 border-blue-600 pl-3"
+            >
+              新規契約登録
+            </h2>
+            <button
+              @click="closeModal"
+              class="text-slate-400 hover:text-slate-600"
+            >
+              <svg
+                class="w-6 h-6"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M6 18L18 6M6 6l12 12"
+                ></path>
+              </svg>
+            </button>
+          </div>
+          <div class="p-6 overflow-y-auto max-h-[calc(100vh-200px)]">
+            <div class="space-y-6">
+              <!-- フォルダ選択 -->
+              <div>
+                <label class="block text-sm font-medium text-slate-600 mb-1">保存先フォルダ</label>
+                <select 
+                  v-model="newContract.folder_id"
+                  class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition bg-white"
+                >
+                  <option :value="null">未分類 (ルート)</option>
+                  <option v-for="f in flatFolders" :key="f.id" :value="f.id">
+                    {{ '- '.repeat(f.level) + f.name }}
+                  </option>
+                </select>
+              </div>
+
+              <div>
+                <label class="block text-sm font-medium text-slate-600 mb-1"
+                  >契約タイトル</label
+                >
+                <input
+                  v-model="newContract.title"
+                  type="text"
+                  class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+                  placeholder="例：システム開発委託契約"
+                />
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-slate-600 mb-1"
+                  >顧客名</label
+                >
+                <input
+                  v-model="newContract.client_name"
+                  type="text"
+                  class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+                  placeholder="例：株式会社テックリード"
+                />
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-slate-600 mb-1"
+                  >契約金額</label
+                >
+                <input
+                  v-model.number="newContract.amount"
+                  type="number"
+                  class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+                  placeholder="0"
+                />
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-slate-600 mb-1"
+                  >契約締結日</label
+                >
+                <input
+                  v-model="newContract.contract_date"
+                  type="date"
+                  class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+                />
+              </div>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label class="block text-sm font-medium text-slate-600 mb-1"
+                    >契約開始日</label
+                  >
+                  <input
+                    v-model="newContract.start_date"
+                    type="date"
+                    class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+                  />
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-slate-600 mb-1"
+                    >契約終了日</label
+                  >
+                  <input
+                    v-model="newContract.end_date"
+                    type="date"
+                    class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+                  />
+                </div>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-slate-600 mb-1"
+                  >契約要約</label
+                >
+                <textarea
+                  v-model="newContract.summary"
+                  class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+                  rows="3"
+                  placeholder="AI解析で自動入力されますが、手動で編集も可能です"
+                ></textarea>
+              </div>
+              <div class="flex items-center pt-2">
+                <input
+                  v-model="newContract.auto_renewal"
+                  id="auto_renewal"
+                  type="checkbox"
+                  class="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500"
+                />
+                <label
+                  for="auto_renewal"
+                  class="ml-2 text-sm font-medium text-slate-600"
+                  >自動更新あり</label
+                >
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-slate-600 mb-1"
+                  >契約書 (PDF)</label
+                >
+                <div
+                  @dragover.prevent="handleDragOver"
+                  @dragleave.prevent="handleDragLeave"
+                  @drop.prevent="handleDrop"
+                  @click="triggerFileInput"
+                  :class="[
+                    'relative border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors duration-200',
+                    isDragging ? 'border-blue-500 bg-blue-50' : 'border-slate-300 hover:border-blue-400 hover:bg-slate-50'
+                  ]"
+                >
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    ref="fileInputRef"
+                    @change="handleFileChange"
+                    class="hidden"
+                  />
+                  <div v-if="isAnalyzing" class="absolute inset-0 flex flex-col items-center justify-center bg-white bg-opacity-90 z-10 rounded-lg">
+                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-2"></div>
+                    <p class="text-sm font-bold text-blue-600 animate-pulse">AI解析中...</p>
+                    <p class="text-xs text-slate-500">契約書の内容を読み取っています</p>
+                  </div>
+
+                  <div v-if="!pdfFile && !isAnalyzing" class="space-y-2 pointer-events-none">
+                    <svg
+                      class="mx-auto h-10 w-10 text-slate-400"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                      ></path>
+                    </svg>
+                    <p class="text-sm text-slate-600 font-medium">
+                      クリックしてファイルを選択<br />またはドラッグ＆ドロップ
+                    </p>
+                    <p class="text-xs text-slate-400">PDF形式のみ</p>
+                  </div>
+                  <div v-else-if="pdfFile" class="flex items-center justify-center gap-3">
+                    <svg
+                      class="w-8 h-8 text-red-500"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                      ></path>
+                    </svg>
+                    <div class="text-left">
+                      <p
+                        class="text-sm font-bold text-slate-700 truncate max-w-[200px]"
+                      >
+                        {{ pdfFile.name }}
+                      </p>
+                      <p class="text-xs text-slate-500">
+                        {{ (pdfFile.size / 1024).toFixed(1) }} KB
+                      </p>
+                    </div>
+                    <button
+                      @click.stop="removeFile"
+                      class="p-1 hover:bg-slate-200 rounded-full text-slate-400 hover:text-slate-600 transition"
+                    >
+                      <svg
+                        class="w-5 h-5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M6 18L18 6M6 6l12 12"
+                        ></path>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div
+            class="p-6 bg-slate-50 border-t border-slate-100 flex justify-end gap-3"
+          >
+            <button
+              @click="closeModal"
+              class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg transition"
+            >
+              キャンセル
+            </button>
+            <button
+              @click="addContract"
+              class="px-6 py-2 bg-gradient-to-r from-blue-600 to-blue-700 text-white font-bold rounded-lg hover:from-blue-700 hover:to-blue-800 transition shadow-md hover:shadow-lg transform active:scale-95"
+            >
+              登録する
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- フォルダ作成モーダル -->
+      <div
+        v-if="showFolderModal"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 p-4"
+        @click.self="showFolderModal = false"
+      >
+        <div class="bg-white rounded-xl shadow-xl w-full max-w-sm overflow-hidden">
+          <div class="p-4 border-b border-slate-100">
+            <h3 class="font-bold text-slate-800">新しいフォルダを作成</h3>
+          </div>
+          <div class="p-6">
+            <p v-if="currentFolderId && currentFolderId !== 0" class="text-xs text-slate-500 mb-2">
+              親フォルダ: <span class="font-bold">{{ getFolderName(currentFolderId) }}</span>
+            </p>
+            <p v-else class="text-xs text-slate-500 mb-2">
+              ルートフォルダ（第1階層）として作成します
+            </p>
+            <label class="block text-sm font-medium text-slate-600 mb-1">フォルダ名</label>
+            <input
+              v-model="newFolderName"
+              type="text"
+              class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+              placeholder="例：2024年度契約"
+              @keydown.enter="createFolder"
+            />
+          </div>
+          <div class="p-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-2">
+            <button @click="showFolderModal = false" class="px-3 py-1.5 text-slate-600 hover:bg-slate-200 rounded text-sm">キャンセル</button>
+            <button @click="createFolder" class="px-4 py-1.5 bg-blue-600 text-white font-bold rounded text-sm hover:bg-blue-700">作成</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- フォルダ移動モーダル -->
+      <div
+        v-if="showMoveModal"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 p-4"
+        @click.self="showMoveModal = false"
+      >
+        <div class="bg-white rounded-xl shadow-xl w-full max-w-sm overflow-hidden">
+          <div class="p-4 border-b border-slate-100">
+            <h3 class="font-bold text-slate-800">フォルダ移動</h3>
+          </div>
+          <div class="p-6">
+            <p class="text-sm text-slate-600 mb-4">{{ selectedContractIds.length }}件の契約を移動します</p>
+            <label class="block text-sm font-medium text-slate-600 mb-1">移動先フォルダ</label>
+            <select v-model="targetFolderId" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none transition bg-white">
+              <option :value="null">未分類 (ルート)</option>
+              <option v-for="f in flatFolders" :key="f.id" :value="f.id">
+                {{ '- '.repeat(f.level) + f.name }}
+              </option>
+            </select>
+          </div>
+          <div class="p-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-2">
+            <button @click="showMoveModal = false" class="px-3 py-1.5 text-slate-600 hover:bg-slate-200 rounded text-sm">キャンセル</button>
+            <button @click="bulkMove" class="px-4 py-1.5 bg-blue-600 text-white font-bold rounded text-sm hover:bg-blue-700">移動する</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        const { createApp, ref, onMounted, computed, watch } = Vue;
+
+        // フォルダアイテムコンポーネント (再帰的)
+        const FolderItem = {
+          name: "FolderItem",
+          props: ["model", "selectedId"],
+          emits: ["select", "delete", "rename"],
+          data() {
+            return { 
+              isOpen: true,
+              isEditing: false,
+              editName: this.model.name
+            };
+          },
+          methods: {
+            startEdit() {
+              this.editName = this.model.name;
+              this.isEditing = true;
+              this.$nextTick(() => {
+                const input = this.$refs.nameInput;
+                if(input) input.focus();
+              });
+            },
+            finishEdit() {
+              if (this.isEditing) {
+                this.isEditing = false;
+                if (this.editName && this.editName.trim() !== "" && this.editName !== this.model.name) {
+                  this.$emit('rename', { id: this.model.id, name: this.editName });
+                } else {
+                  this.editName = this.model.name;
+                }
+              }
+            },
+            cancelEdit() {
+              this.isEditing = false;
+              this.editName = this.model.name;
+            }
+          },
+          template: "#folder-item-template",
+        };
+
+        const app = createApp({
+          components: {
+            FolderItem,
+          },
+          setup() {
+            const contracts = ref([]);
+            const folders = ref([]);
+            const isLoading = ref(false);
+            const selectedContractIds = ref([]);
+            const showMoveModal = ref(false);
+            const targetFolderId = ref(null);
+            const editingState = ref({ id: null, field: null });
+            const editForm = ref({});
+            const showModal = ref(false);
+            const newContract = ref({
+              title: "",
+              client_name: "",
+              amount: 0,
+              contract_date: "",
+              start_date: "",
+              end_date: "",
+              auto_renewal: false,
+              summary: "",
+              folder_id: null,
+            });
+            const pdfFile = ref(null);
+            const fileInputRef = ref(null);
+            const isDragging = ref(false);
+            const isAnalyzing = ref(false);
+
+            // フォルダ関連の状態
+            const isSidebarOpen = ref(true);
+            
+            // localStorageから前回のフォルダ選択状態を復元
+            const savedFolderId = localStorage.getItem('currentFolderId');
+            let initialFolderId = null;
+            if (savedFolderId !== null && savedFolderId !== 'null') {
+              initialFolderId = Number(savedFolderId);
+            }
+            const currentFolderId = ref(initialFolderId); // null: 全て, 0: 未分類, ID: 特定フォルダ
+
+            const showFolderModal = ref(false);
+            const newFolderName = ref("");
+            const filterText = ref("");
+
+            const startResize = (e) => {
+              const th = e.target.closest('th');
+              const startX = e.pageX;
+              const startWidth = th.offsetWidth;
+
+              const onMouseMove = (moveEvent) => {
+                const currentWidth = startWidth + (moveEvent.pageX - startX);
+                if (currentWidth > 50) {
+                  th.style.width = `${currentWidth}px`;
+                  th.style.minWidth = `${currentWidth}px`;
+                }
+              };
+
+              const onMouseUp = () => {
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', onMouseUp);
+                document.body.style.cursor = '';
+              };
+
+              document.addEventListener('mousemove', onMouseMove);
+              document.addEventListener('mouseup', onMouseUp);
+              document.body.style.cursor = 'col-resize';
+            };
+
+            const getRowClass = (contract) => {
+              if (!contract.end_date) return 'hover:bg-slate-50';
+              
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              const endDate = new Date(contract.end_date);
+              const diffTime = endDate - today;
+              const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+              // 期限切れ (赤背景・濃いめ)
+              if (diffDays < 0) return 'bg-red-100 hover:bg-red-200';
+              // 30日以内 (赤背景・薄め)
+              if (diffDays <= 30) return 'bg-red-50 hover:bg-red-100';
+              
+              return 'hover:bg-slate-50';
+            };
+
+            const fetchContracts = async () => {
+              isLoading.value = true;
+              try {
+                let url = "/contracts";
+                const params = new URLSearchParams();
+
+                if (currentFolderId.value !== null) {
+                  params.append("folder_id", currentFolderId.value);
+                }
+                if (filterText.value) {
+                  params.append("title", filterText.value);
+                }
+
+                if (params.toString()) {
+                  url += "?" + params.toString();
+                }
+
+                const res = await fetch(url);
+                contracts.value = await res.json();
+                selectedContractIds.value = []; // リスト更新時に選択解除
+              } finally {
+                isLoading.value = false;
+              }
+            };
+
+            const fetchFolders = async () => {
+              const res = await fetch("/folders");
+              if (res.ok) {
+                folders.value = await res.json();
+              }
+            };
+
+            // APIから取得したツリー構造をそのまま使用
+            const folderTree = computed(() => {
+              return folders.value;
+            });
+
+            // セレクトボックスや検索用にフラット化
+            const flatFolders = computed(() => {
+              const result = [];
+              const traverse = (nodes, level = 0) => {
+                if (!nodes) return;
+                for (const node of nodes) {
+                  result.push({ ...node, level });
+                  if (node.children) traverse(node.children, level + 1);
+                }
+              };
+              traverse(folders.value);
+              return result;
+            });
+
+            // フォルダ選択状態が変わったらlocalStorageに保存
+            watch(currentFolderId, (newVal) => {
+              localStorage.setItem('currentFolderId', newVal);
+            });
+
+            const isAllSelected = computed({
+              get: () => contracts.value.length > 0 && selectedContractIds.value.length === contracts.value.length,
+              set: (val) => {
+                selectedContractIds.value = val ? contracts.value.map(c => c.id) : [];
+              }
+            });
+
+            const selectFolder = (id) => {
+              currentFolderId.value = id;
+              fetchContracts();
+            };
+
+            const getFolderName = (id) => {
+              if (!id) return "";
+              const f = flatFolders.value.find((f) => f.id === id);
+              return f ? f.name : "";
+            };
+
+            const openFolderModal = () => {
+              newFolderName.value = "";
+              showFolderModal.value = true;
+            };
+
+            const createFolder = async () => {
+              if (!newFolderName.value) return;
+
+              const res = await fetch("/folders", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  name: newFolderName.value,
+                  parent_id:
+                    currentFolderId.value && currentFolderId.value !== 0
+                      ? currentFolderId.value
+                      : null,
+                }),
+              });
+
+              if (!res.ok) {
+                const err = await res.json();
+                alert(err.error);
+                return;
+              }
+
+              showFolderModal.value = false;
+              fetchFolders();
+            };
+
+            const deleteFolder = async (id) => {
+              if (
+                !confirm("フォルダを削除しますか？\n※フォルダ内に契約書やサブフォルダがある場合は削除できません。")
+              )
+                return;
+              const res = await fetch(`/folders/${id}`, { method: "DELETE" });
+              if (!res.ok) {
+                const err = await res.json();
+                alert(err.error);
+                return;
+              }
+              if (currentFolderId.value === id) currentFolderId.value = null;
+              fetchFolders();
+              fetchContracts(); // フォルダIDが消えた契約の表示更新のため
+            };
+
+            const renameFolder = async ({ id, name }) => {
+              try {
+                const res = await fetch(`/folders/${id}`, {
+                  method: "PUT",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ name }),
+                });
+                if (!res.ok) {
+                  const err = await res.json();
+                  alert(err.error || "更新に失敗しました");
+                  return;
+                }
+                fetchFolders();
+              } catch (e) {
+                console.error(e);
+                alert("エラーが発生しました");
+              }
+            };
+
+            const openModal = () => {
+              showModal.value = true;
+              // 現在選択中のフォルダを初期値にする（未分類や全ての場合はルート）
+              newContract.value.folder_id =
+                currentFolderId.value && currentFolderId.value !== 0
+                  ? currentFolderId.value
+                  : null;
+            };
+
+            const closeModal = () => {
+              showModal.value = false;
+              // フォームのリセット
+              newContract.value = {
+                title: "",
+                client_name: "",
+                amount: 0,
+                contract_date: "",
+                start_date: "",
+                end_date: "",
+                auto_renewal: false,
+              summary: "",
+                folder_id: null,
+              };
+              pdfFile.value = null;
+              if (fileInputRef.value) fileInputRef.value.value = "";
+            };
+
+            const handleDragOver = () => {
+              isDragging.value = true;
+            };
+
+            const handleDragLeave = () => {
+              isDragging.value = false;
+            };
+
+            const analyzePdf = async (file) => {
+              if (!file) return;
+              isAnalyzing.value = true;
+              
+              const formData = new FormData();
+              formData.append('pdf', file);
+
+              try {
+                // バックエンドのAI解析APIを呼び出し
+                const res = await fetch('/api/analyze', {
+                  method: 'POST',
+                  body: formData
+                });
+
+                if (res.ok) {
+                  const data = await res.json();
+                  // 解析結果をフォームに反映
+                  if (data.title) newContract.value.title = data.title;
+                  if (data.client_name) newContract.value.client_name = data.client_name;
+                  if (data.amount) newContract.value.amount = data.amount;
+                  if (data.contract_date) newContract.value.contract_date = data.contract_date;
+                  if (data.start_date) newContract.value.start_date = data.start_date;
+                  if (data.end_date) newContract.value.end_date = data.end_date;
+                  if (typeof data.auto_renewal === 'boolean') newContract.value.auto_renewal = data.auto_renewal;
+                  if (data.summary) newContract.value.summary = data.summary;
+                }
+              } catch (e) {
+                console.error("AI解析エラー:", e);
+              } finally {
+                isAnalyzing.value = false;
+              }
+            };
+
+            const handleDrop = (e) => {
+              isDragging.value = false;
+              const files = e.dataTransfer.files;
+              if (files.length > 0) {
+                if (files[0].type === "application/pdf") {
+                  pdfFile.value = files[0];
+                  analyzePdf(pdfFile.value);
+                } else {
+                  alert("PDFファイルのみアップロード可能です");
+                }
+              }
+            };
+
+            const triggerFileInput = () => {
+              fileInputRef.value.click();
+            };
+
+            const handleFileChange = (e) => {
+              pdfFile.value = e.target.files[0] || null;
+              if (pdfFile.value) analyzePdf(pdfFile.value);
+            };
+
+            const removeFile = () => {
+              pdfFile.value = null;
+              if (fileInputRef.value) fileInputRef.value.value = "";
+            };
+
+            const addContract = async () => {
+              const formData = new FormData();
+              formData.append("title", newContract.value.title);
+              formData.append("client_name", newContract.value.client_name);
+              formData.append("amount", newContract.value.amount);
+              formData.append("contract_date", newContract.value.contract_date);
+              formData.append("start_date", newContract.value.start_date);
+              formData.append("end_date", newContract.value.end_date);
+              formData.append("auto_renewal", newContract.value.auto_renewal);
+              formData.append("summary", newContract.value.summary);
+              if (newContract.value.folder_id)
+                formData.append("folder_id", newContract.value.folder_id);
+              if (pdfFile.value) formData.append("pdf", pdfFile.value);
+
+              await fetch("/contracts", { method: "POST", body: formData });
+              alert("登録しました");
+              closeModal();
+              fetchContracts();
+            };
+
+            const isEditing = (id, field) => {
+              return (
+                editingState.value.id === id &&
+                editingState.value.field === field
+              );
+            };
+
+            const startEditing = (contract, field) => {
+              if (
+                editingState.value.id === contract.id &&
+                editingState.value.field === field
+              )
+                return;
+              editingState.value = { id: contract.id, field };
+              editForm.value = { ...contract };
+
+              // 次の描画サイクルでフォーカスを当てる
+              setTimeout(() => {
+                const input = document.getElementById(
+                  `input-${contract.id}-${field}`
+                );
+                if (input) input.focus();
+              }, 50);
+            };
+
+            const cancelEditing = () => {
+              editingState.value = { id: null, field: null };
+              editForm.value = {};
+            };
+
+            const saveCell = async () => {
+              await updateContract();
+            };
+
+            const updateContract = async () => {
+              if (!editingState.value.id) return;
+
+              const payload = {
+                title: editForm.value.title,
+                client_name: editForm.value.client_name,
+                amount: editForm.value.amount,
+                contract_date: editForm.value.contract_date,
+                start_date: editForm.value.start_date,
+                end_date: editForm.value.end_date,
+                auto_renewal: editForm.value.auto_renewal,
+                summary: editForm.value.summary,
+              };
+
+              try {
+                const res = await fetch(`/contracts/${editingState.value.id}`, {
+                  method: "PUT",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(payload),
+                });
+                if (res.ok) {
+                  await fetchContracts();
+                  cancelEditing();
+                } else {
+                  alert("更新に失敗しました");
+                }
+              } catch (e) {
+                console.error(e);
+                alert("エラーが発生しました");
+              }
+            };
+
+            const deleteContract = async (id) => {
+              if (!confirm("本当に削除しますか？")) return;
+              await fetch(`/contracts/${id}`, { method: "DELETE" });
+              fetchContracts();
+            };
+
+            const bulkDelete = async () => {
+              if (!selectedContractIds.value.length) return;
+              if (!confirm(`${selectedContractIds.value.length}件の契約を削除しますか？`)) return;
+              
+              for (const id of selectedContractIds.value) {
+                await fetch(`/contracts/${id}`, { method: "DELETE" });
+              }
+              fetchContracts();
+              selectedContractIds.value = [];
+            };
+
+            const openMoveModal = () => {
+              targetFolderId.value = null;
+              showMoveModal.value = true;
+            };
+
+            const bulkMove = async () => {
+              for (const id of selectedContractIds.value) {
+                await fetch(`/contracts/${id}`, {
+                  method: "PUT",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ folder_id: targetFolderId.value }),
+                });
+              }
+              showMoveModal.value = false;
+              fetchContracts();
+              selectedContractIds.value = [];
+            };
+
+            onMounted(() => {
+              fetchFolders();
+              fetchContracts();
+            });
+
+            return {
+              contracts,
+              isLoading,
+              fetchContracts,
+              bulkDelete,
+              deleteContract,
+              editingState,
+              editForm,
+              showModal,
+              newContract,
+              pdfFile,
+              fileInputRef,
+              isDragging,
+              isAnalyzing,
+              openModal,
+              closeModal,
+              handleDragOver,
+              handleDragLeave,
+              handleDrop,
+              triggerFileInput,
+              handleFileChange,
+              removeFile,
+              addContract,
+              isEditing,
+              startEditing,
+              cancelEditing,
+              saveCell,
+              updateContract,
+              // Folder related
+              folders,
+              folderTree,
+              isSidebarOpen,
+              currentFolderId,
+              selectFolder,
+              getFolderName,
+              showFolderModal,
+              newFolderName,
+              openFolderModal,
+              createFolder,
+              deleteFolder,
+              renameFolder,
+              filterText,
+              selectedContractIds,
+              isAllSelected,
+              showMoveModal,
+              targetFolderId,
+              openMoveModal,
+              bulkMove,
+              startResize,
+              getRowClass,
+            };
+          },
+        });
+
+        app.mount("#app");
+      });
+    </script>
+  </body>
+</html>
