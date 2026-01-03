@@ -29,7 +29,7 @@ var httpClient = &http.Client{
 }
 
 // 定数定義
-const defaultGeminiModel = "gemini-2.5-pro"
+const defaultGeminiModel = "gemini-2.5-flash"
 const defaultPort = "8080"
 
 type Folder struct {
