@@ -15,6 +15,28 @@
       body {
         font-family: 'Inter', system-ui, -apple-system, sans-serif;
       }
+      /* Custom Scrollbar */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #cbd5e1;
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #94a3b8;
+      }
+      @keyframes fadeInUp {
+        from { opacity: 0; transform: translate3d(0, 10px, 0); }
+        to { opacity: 1; transform: translate3d(0, 0, 0); }
+      }
+      .animate-fade-in-up {
+        animation: fadeInUp 0.3s ease-out forwards;
+      }
       .resizer {
         position: absolute;
         right: 0;
@@ -40,11 +62,11 @@
     <script type="text/x-template" id="folder-item-template">
       <li>
         <div 
-          class="flex items-center justify-between px-2 py-1.5 rounded-md cursor-pointer text-sm transition-colors group mb-0.5"
-          :class="selectedId === model.id ? 'bg-blue-50 text-blue-700 font-bold shadow-sm ring-1 ring-blue-100' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'"
+          class="flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer text-sm transition-all duration-200 group mb-1"
+          :class="selectedId === model.id ? 'bg-blue-50 text-blue-700 font-semibold shadow-sm' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'"
           @click="$emit('select', model.id)"
         >
-          <div class="flex items-center gap-2 overflow-hidden w-full">
+          <div class="flex items-center gap-2.5 overflow-hidden w-full">
             <!-- 開閉ボタン -->
             <button 
               v-if="model.children && model.children.length" 
@@ -56,7 +78,7 @@
             <span v-else class="w-4 flex-shrink-0"></span>
             
             <!-- アイコン -->
-            <svg class="w-4 h-4 flex-shrink-0" :class="selectedId === model.id ? 'text-blue-500' : 'text-yellow-400'" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
+            <svg class="w-4 h-4 flex-shrink-0 transition-colors" :class="selectedId === model.id ? 'text-blue-500' : 'text-slate-400 group-hover:text-yellow-400'" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
             
             <!-- 名前表示 / 編集フォーム -->
             <div v-if="isEditing" class="flex-1 min-w-0" @click.stop>
@@ -100,20 +122,24 @@
       </li>
     </script>
   </head>
-  <body class="bg-slate-100 text-slate-800 antialiased h-screen overflow-hidden">
+  <body class="bg-slate-50 text-slate-800 antialiased h-screen overflow-hidden selection:bg-blue-100 selection:text-blue-800">
     <div id="app" v-cloak class="h-full flex flex-col">
-      <nav class="bg-gradient-to-r from-blue-900 via-blue-800 to-indigo-900 text-white shadow-xl px-6 py-4 flex-shrink-0 z-20 border-b border-white/10">
+      <nav class="bg-white text-slate-800 shadow-sm px-6 py-3 flex-shrink-0 z-30 border-b border-slate-200/60">
         <div class="flex justify-between items-center">
           <div class="flex items-center gap-4">
-            <button @click="isSidebarOpen = !isSidebarOpen" class="p-1.5 hover:bg-white/10 rounded-lg transition text-blue-100 hover:text-white">
+            <button @click="isSidebarOpen = !isSidebarOpen" class="p-2 hover:bg-slate-100 rounded-lg transition text-slate-500 hover:text-slate-700">
               <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
             </button>
-            <h1 class="text-xl font-bold tracking-tight text-white drop-shadow-sm">契約管理くん</h1>
+            <h1 class="text-xl font-bold tracking-tight text-slate-800 flex items-center gap-2">
+              <span class="bg-blue-600 text-white p-1 rounded-md"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg></span>
+              契約管理くん
+            </h1>
           </div>
           <button
             @click="openModal"
-            class="bg-blue-500 hover:bg-blue-400 text-white px-5 py-2 rounded-full font-bold text-sm transition-all shadow-lg hover:shadow-blue-500/30 active:scale-95 border border-blue-400/50"
+            class="bg-slate-900 hover:bg-slate-800 text-white px-5 py-2.5 rounded-lg font-semibold text-sm transition-all shadow-md hover:shadow-lg active:scale-95 flex items-center gap-2"
           >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
             + 新規契約登録
           </button>
         </div>
@@ -122,37 +148,37 @@
       <div class="flex flex-1 overflow-hidden">
         <!-- サイドバー (フォルダツリー) -->
         <aside 
-          class="bg-white border-r border-slate-200 flex flex-col transition-all duration-300 ease-in-out overflow-hidden"
+          class="bg-white border-r border-slate-200 flex flex-col transition-all duration-300 ease-in-out overflow-hidden z-20"
           :class="isSidebarOpen ? 'w-64' : 'w-0 opacity-0'"
         >
-          <div class="p-4 border-b border-slate-100 flex justify-between items-center bg-white">
-            <h2 class="font-bold text-slate-800 text-sm tracking-wide">フォルダ</h2>
-            <button @click="openFolderModal" class="text-slate-400 hover:text-blue-600 hover:bg-blue-50 p-1.5 rounded-md transition" title="フォルダ作成">
+          <div class="p-5 border-b border-slate-100 flex justify-between items-center bg-white sticky top-0 z-10">
+            <h2 class="font-bold text-slate-400 text-xs uppercase tracking-wider">フォルダ</h2>
+            <button @click="openFolderModal" class="text-slate-400 hover:text-blue-600 hover:bg-blue-50 p-1.5 rounded-md transition duration-200" title="フォルダ作成">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
             </button>
           </div>
           
-          <div class="flex-1 overflow-y-auto p-3">
+          <div class="flex-1 overflow-y-auto p-4">
             <ul class="space-y-0.5">
               <!-- 全ての契約 -->
               <li>
                 <div 
-                  class="flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer text-sm transition-colors mb-0.5"
-                  :class="currentFolderId === null ? 'bg-blue-50 text-blue-700 font-bold shadow-sm ring-1 ring-blue-100' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'"
+                  class="flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer text-sm transition-all duration-200 mb-1"
+                  :class="currentFolderId === null ? 'bg-blue-50 text-blue-700 font-semibold shadow-sm' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'"
                   @click="selectFolder(null)"
                 >
-                  <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                  <svg class="w-4 h-4" :class="currentFolderId === null ? 'text-blue-500' : 'text-slate-400'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
                   全ての契約
                 </div>
               </li>
               <!-- 未分類 -->
               <li>
                 <div 
-                  class="flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer text-sm transition-colors mb-2"
-                  :class="currentFolderId === 0 ? 'bg-blue-50 text-blue-700 font-bold shadow-sm ring-1 ring-blue-100' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'"
+                  class="flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer text-sm transition-all duration-200 mb-4"
+                  :class="currentFolderId === 0 ? 'bg-blue-50 text-blue-700 font-semibold shadow-sm' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'"
                   @click="selectFolder(0)"
                 >
-                  <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                  <svg class="w-4 h-4" :class="currentFolderId === 0 ? 'text-blue-500' : 'text-slate-400'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                   未分類
                 </div>
               </li>
@@ -172,23 +198,26 @@
         </aside>
 
         <!-- メインコンテンツ -->
-        <main class="flex-1 overflow-y-auto bg-slate-100 p-6">
-          <div class="flex justify-between items-end mb-4">
+        <main class="flex-1 overflow-y-auto bg-slate-50 p-8">
+          <div class="flex justify-between items-center mb-6">
             <div class="flex items-center gap-3">
-              <h2 class="text-2xl font-bold text-slate-800 tracking-tight">
+              <h2 class="text-2xl font-bold text-slate-900 tracking-tight">
                 <span v-if="currentFolderId === null">全ての契約</span>
                 <span v-else-if="currentFolderId === 0">未分類の契約</span>
                 <span v-else>{{ getFolderName(currentFolderId) }}</span>
               </h2>
-              <span class="bg-white text-slate-600 text-xs px-2.5 py-1 rounded-full font-bold shadow-sm border border-slate-200">{{ contracts.length }}</span>
+              <span class="bg-slate-200 text-slate-600 text-xs px-2.5 py-1 rounded-full font-bold">{{ contracts.length }}</span>
             </div>
             
             <!-- 検索フィルター (簡易) -->
-            <div class="flex gap-2">
+            <div class="relative group">
+              <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <svg class="h-4 w-4 text-slate-400 group-focus-within:text-blue-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+              </div>
               <input 
                 type="text" 
-                placeholder="契約名で検索..." 
-                class="px-4 py-2 text-sm border border-slate-300 rounded-full focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-sm w-64 transition-all focus:w-72"
+                placeholder="契約を検索..." 
+                class="pl-10 pr-4 py-2.5 text-sm bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 focus:outline-none shadow-sm w-64 transition-all focus:w-80 placeholder-slate-400 text-slate-700"
                 @input="e => filterText = e.target.value"
                 @keydown.enter="fetchContracts"
               >
@@ -196,95 +225,95 @@
           </div>
 
           <!-- 一括操作バー -->
-          <div v-if="selectedContractIds.length > 0" class="bg-white border border-blue-200 rounded-xl px-4 py-3 mb-4 flex justify-between items-center shadow-lg shadow-blue-100 animate-pulse-once">
+          <div v-if="selectedContractIds.length > 0" class="bg-slate-900 text-white rounded-xl px-6 py-3 mb-6 flex justify-between items-center shadow-xl animate-fade-in-up z-20 relative">
             <div class="flex items-center gap-3">
-              <span class="font-bold text-blue-800 text-sm">{{ selectedContractIds.length }}件を選択中</span>
-              <button @click="selectedContractIds = []" class="text-xs text-blue-600 hover:underline">選択解除</button>
+              <span class="font-bold text-sm">{{ selectedContractIds.length }}件を選択中</span>
+              <button @click="selectedContractIds = []" class="text-xs text-slate-400 hover:text-white transition">選択解除</button>
             </div>
             <div class="flex gap-2">
-              <button @click="openMoveModal" class="bg-white border border-blue-300 text-blue-700 hover:bg-blue-50 px-3 py-1.5 rounded-lg text-sm font-bold transition shadow-sm">フォルダ移動</button>
-              <button @click="bulkDelete" class="bg-white border border-red-300 text-red-600 hover:bg-red-50 px-3 py-1.5 rounded-lg text-sm font-bold transition shadow-sm">削除</button>
+              <button @click="openMoveModal" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-1.5 rounded-lg text-sm font-medium transition shadow-sm border border-slate-600">フォルダ移動</button>
+              <button @click="bulkDelete" class="bg-red-600 hover:bg-red-500 text-white px-4 py-1.5 rounded-lg text-sm font-medium transition shadow-sm border border-red-500">削除</button>
             </div>
           </div>
 
           <div
-            class="bg-white rounded-2xl shadow-xl border border-slate-200/60 overflow-hidden"
+            class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden"
           >
             <div class="overflow-x-auto">
-            <table class="min-w-full divide-y divide-slate-200">
-              <thead class="bg-slate-50 border-b border-slate-200">
+            <table class="min-w-full">
+              <thead class="bg-slate-50 border-b border-slate-200/80">
                 <tr>
                   <th
                     scope="col"
-                    class="px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap w-4"
+                    class="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-4"
                   >
                     <input type="checkbox" v-model="isAllSelected" class="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500">
                   </th>
                   <th
                     scope="col"
-                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                    class="relative px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap group"
                   >
                     契約名
                     <div class="resizer" @mousedown.stop="startResize"></div>
                   </th>
                   <th
                     scope="col"
-                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                    class="relative px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap group"
                   >
                     フォルダ
                     <div class="resizer" @mousedown.stop="startResize"></div>
                   </th>
                   <th
                     scope="col"
-                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                    class="relative px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap group"
                   >
                     顧客名
                     <div class="resizer" @mousedown.stop="startResize"></div>
                   </th>
                   <th
                     scope="col"
-                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                    class="relative px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap group"
                   >
                     金額
                     <div class="resizer" @mousedown.stop="startResize"></div>
                   </th>
                   <th
                     scope="col"
-                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                    class="relative px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap group"
                   >
                     締結日
                     <div class="resizer" @mousedown.stop="startResize"></div>
                   </th>
                   <th
                     scope="col"
-                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                    class="relative px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap group"
                   >
                     契約開始日
                     <div class="resizer" @mousedown.stop="startResize"></div>
                   </th>
                   <th
                     scope="col"
-                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                    class="relative px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap group"
                   >
                     契約終了日
                     <div class="resizer" @mousedown.stop="startResize"></div>
                   </th>
                   <th
                     scope="col"
-                    class="relative px-6 py-2 text-left text-sm font-bold text-slate-700 whitespace-nowrap"
+                    class="relative px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap group"
                   >
                     要約
                     <div class="resizer" @mousedown.stop="startResize"></div>
                   </th>
                   <th
                     scope="col"
-                    class="px-6 py-2 text-right text-sm font-bold text-slate-700 whitespace-nowrap"
+                    class="px-6 py-3 text-right text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap"
                   >
                     操作
                   </th>
                 </tr>
               </thead>
-              <tbody class="bg-white divide-y divide-slate-200">
+              <tbody class="bg-white divide-y divide-slate-100">
                 <!-- スケルトンローディング -->
                 <tr v-if="isLoading" v-for="n in 5" :key="'skeleton-'+n" class="animate-pulse">
                   <td class="px-6 py-4 whitespace-nowrap w-4"><div class="h-4 w-4 bg-slate-200 rounded"></div></td>
@@ -302,17 +331,17 @@
                 <tr
                   v-for="c in contracts"
                   :key="c.id"
-                  class="transition"
+                  class="transition duration-150 ease-in-out group/row"
                   :class="getRowClass(c)"
                 >
                   <!-- チェックボックス -->
-                  <td class="px-6 py-2 whitespace-nowrap w-4" @click.stop>
+                  <td class="px-6 py-3 whitespace-nowrap w-4" @click.stop>
                     <input type="checkbox" :value="c.id" v-model="selectedContractIds" class="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500">
                   </td>
 
                   <!-- タイトル -->
                   <td
-                    class="px-6 py-2 whitespace-nowrap cursor-pointer group"
+                    class="px-6 py-3 whitespace-nowrap cursor-pointer group"
                     @click="startEditing(c, 'title')"
                   >
                     <div v-if="isEditing(c.id, 'title')">
@@ -328,12 +357,12 @@
                         @click.stop
                       />
                     </div>
-                    <div v-else class="flex items-center gap-2">
-                      <div class="text-sm font-bold text-slate-900">
+                    <div v-else class="flex items-center gap-3">
+                      <div class="text-sm font-semibold text-slate-900">
                         <a
                           :href="`/contract_detail.html?id=${c.id}`"
                           target="_blank"
-                          class="hover:text-blue-600 hover:underline"
+                          class="hover:text-blue-600 transition-colors"
                           @click.stop
                           >{{ c.title || '(名称未設定)' }}</a
                         >
@@ -355,9 +384,9 @@
                   </td>
 
                   <!-- フォルダ -->
-                  <td class="px-6 py-2 whitespace-nowrap text-sm text-slate-500">
+                  <td class="px-6 py-3 whitespace-nowrap text-sm text-slate-500">
                     <div class="flex items-center gap-1">
-                      <svg v-if="c.folder_id" class="w-4 h-4 text-yellow-400" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
+                      <svg v-if="c.folder_id" class="w-4 h-4 text-slate-400" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
                       <span v-else class="text-slate-300">-</span>
                       {{ getFolderName(c.folder_id) || '-' }}
                     </div>
@@ -365,7 +394,7 @@
 
                   <!-- 顧客名 -->
                   <td
-                    class="px-6 py-2 whitespace-nowrap cursor-pointer group"
+                    class="px-6 py-3 whitespace-nowrap cursor-pointer group"
                     @click="startEditing(c, 'client_name')"
                   >
                     <div v-if="isEditing(c.id, 'client_name')">
@@ -403,7 +432,7 @@
 
                   <!-- 金額 -->
                   <td
-                    class="px-6 py-2 whitespace-nowrap cursor-pointer group"
+                    class="px-6 py-3 whitespace-nowrap cursor-pointer group"
                     @click="startEditing(c, 'amount')"
                   >
                     <div v-if="isEditing(c.id, 'amount')">
@@ -420,7 +449,7 @@
                     </div>
                     <div
                       v-else
-                      class="text-sm text-blue-600 font-semibold flex items-center gap-2"
+                      class="text-sm text-slate-700 font-medium tabular-nums flex items-center gap-2"
                     >
                       ¥{{ c.amount?.toLocaleString() }}
                       <svg
@@ -441,7 +470,7 @@
 
                   <!-- 締結日 -->
                   <td
-                    class="px-6 py-2 whitespace-nowrap cursor-pointer group"
+                    class="px-6 py-3 whitespace-nowrap cursor-pointer group"
                     @click="startEditing(c, 'contract_date')"
                   >
                     <div v-if="isEditing(c.id, 'contract_date')">
@@ -458,7 +487,7 @@
                     </div>
                     <div
                       v-else
-                      class="text-sm text-slate-500 flex items-center gap-2"
+                      class="text-sm text-slate-500 tabular-nums flex items-center gap-2"
                     >
                       {{ c.contract_date || '-' }}
                       <svg
@@ -479,7 +508,7 @@
 
                   <!-- 開始日 -->
                   <td
-                    class="px-6 py-2 whitespace-nowrap cursor-pointer group"
+                    class="px-6 py-3 whitespace-nowrap cursor-pointer group"
                     @click="startEditing(c, 'start_date')"
                   >
                     <div v-if="isEditing(c.id, 'start_date')">
@@ -496,7 +525,7 @@
                     </div>
                     <div
                       v-else
-                      class="text-sm text-slate-500 flex items-center gap-2"
+                      class="text-sm text-slate-500 tabular-nums flex items-center gap-2"
                     >
                       {{ c.start_date || '-' }}
                       <svg
@@ -517,7 +546,7 @@
 
                   <!-- 終了日 -->
                   <td
-                    class="px-6 py-2 whitespace-nowrap cursor-pointer group"
+                    class="px-6 py-3 whitespace-nowrap cursor-pointer group"
                     @click="startEditing(c, 'end_date')"
                   >
                     <div v-if="isEditing(c.id, 'end_date')">
@@ -534,7 +563,7 @@
                     </div>
                     <div
                       v-else
-                      class="text-sm text-slate-500 flex items-center gap-2"
+                      class="text-sm text-slate-500 tabular-nums flex items-center gap-2"
                     >
                       {{ c.end_date || '-' }}
                       <svg
@@ -555,7 +584,7 @@
 
                   <!-- 要約 -->
                   <td
-                    class="px-6 py-2 cursor-pointer group"
+                    class="px-6 py-3 cursor-pointer group"
                     @click="startEditing(c, 'summary')"
                   >
                     <div v-if="isEditing(c.id, 'summary')">
@@ -579,11 +608,11 @@
 
                   <!-- 操作 -->
                   <td
-                    class="px-6 py-2 whitespace-nowrap text-right text-sm font-medium"
+                    class="px-6 py-3 whitespace-nowrap text-right text-sm font-medium"
                   >
                     <button
                       @click.stop="deleteContract(c.id)"
-                      class="text-red-500 hover:text-red-700 hover:bg-red-50 px-3 py-1 rounded transition"
+                      class="text-slate-400 hover:text-red-600 hover:bg-red-50 px-3 py-1.5 rounded-lg transition opacity-0 group-hover/row:opacity-100"
                     >
                       削除
                     </button>
@@ -1038,11 +1067,11 @@
               const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
               // 期限切れ (赤背景・濃いめ)
-              if (diffDays < 0) return 'bg-red-100 hover:bg-red-200';
+              if (diffDays < 0) return 'bg-red-50/80 hover:bg-red-100';
               // 30日以内 (赤背景・薄め)
-              if (diffDays <= 30) return 'bg-red-50 hover:bg-red-100';
+              if (diffDays <= 30) return 'bg-orange-50/80 hover:bg-orange-100';
               
-              return 'hover:bg-slate-50';
+              return 'hover:bg-slate-50/80';
             };
 
             const fetchContracts = async () => {
