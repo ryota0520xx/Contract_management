@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -15,7 +16,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
-	"github.com/joho/godotenv"
 	"gorm.io/gorm"
 )
 
@@ -57,10 +57,7 @@ type Contract struct {
 
 func main() {
 	// .envファイルを読み込む（存在する場合）
-	if err := godotenv.Load(); err != nil {
-		// .envがない場合はログに出すが、システム環境変数が設定されていれば動作するためエラーにはしない
-		log.Println(".env file not found, relying on system environment variables")
-	}
+	loadEnv()
 	initDB()
 	ensureUploadsDir()
 
@@ -73,6 +70,31 @@ func main() {
 	log.Printf("Server is running on port %s", port)
 	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
+	}
+}
+
+// loadEnv は標準ライブラリのみで.envファイルを読み込みます
+func loadEnv() {
+	file, err := os.Open(".env")
+	if err != nil {
+		return // .envがない場合は無視
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+			if os.Getenv(key) == "" {
+				os.Setenv(key, val)
+			}
+		}
 	}
 }
 
