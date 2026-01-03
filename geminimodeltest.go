@@ -6,11 +6,15 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 )
 
 func mainGeminiTest() {
-	// あなたのAPIキーを入れてください
-	apiKey := "AIzaSyAoThAN--5-SU86_Hyf2eCMcBSmTtvtS-g"
+	// 環境変数からAPIキーを取得
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	if apiKey == "" {
+		log.Fatal("GEMINI_API_KEY environment variable is not set")
+	}
 	url := "https://generativelanguage.googleapis.com/v1beta/models?key=" + apiKey
 
 	resp, err := http.Get(url)
