@@ -613,6 +613,19 @@ func setupRouter() *gin.Engine {
 		auth.GET("/users", RequireRole("legal_manager"), getUsersHandler)
 		auth.POST("/users", RequireRole("legal_manager"), createUserHandler)
 		auth.PUT("/users/:id", updateUserHandler)
+
+		// 審査ワークフロー
+		auth.POST("/contracts/:id/submit", submitContractHandler)
+		auth.POST("/contracts/:id/accept", acceptContractHandler)
+		auth.POST("/contracts/:id/start-review", startReviewContractHandler)
+		auth.POST("/contracts/:id/request-approval", requestApprovalContractHandler)
+		auth.POST("/contracts/:id/approve", approveContractHandler)
+		auth.POST("/contracts/:id/reject", rejectContractHandler)
+
+		// 審査履歴 / ファイルバージョン管理
+		auth.GET("/contracts/:id/histories", getContractHistoriesHandler)
+		auth.GET("/contracts/:id/files", getContractFilesHandler)
+		auth.POST("/contracts/:id/files", uploadContractFileHandler)
 	}
 
 	return r
@@ -627,6 +640,16 @@ func helloHandler(c *gin.Context) {
 func getContractsHandler(c *gin.Context) {
 	var contracts []Contract
 	query := db.Model(&Contract{})
+
+	// sales ロールは自分の部署の契約のみ参照可
+	if role, _ := c.Get("role"); role == "sales" {
+		if deptID, exists := c.Get("department_id"); exists && deptID != nil {
+			query = query.Where("department_id = ?", deptID)
+		} else {
+			// 部署未設定の sales は何も返さない
+			query = query.Where("1 = 0")
+		}
+	}
 
 	// フィルタリング
 	if title := c.Query("title"); title != "" {
@@ -670,6 +693,20 @@ func createContractHandler(c *gin.Context) {
 		newContract.FolderID = nil
 	}
 
+	// Context から requester_id / department_id を自動セット
+	if uid, exists := c.Get("user_id"); exists {
+		if v, ok := uid.(uint); ok {
+			newContract.RequesterID = &v
+		}
+	}
+	if deptID, exists := c.Get("department_id"); exists && deptID != nil {
+		if v, ok := deptID.(uint); ok {
+			newContract.DepartmentID = &v
+		}
+	}
+	// status は常に draft で登録
+	newContract.Status = "draft"
+
 	var pdfPath, pdfFilename string
 
 	file, err := c.FormFile("pdf")
@@ -694,7 +731,37 @@ func createContractHandler(c *gin.Context) {
 
 func deleteContractHandler(c *gin.Context) {
 	id := c.Param("id")
-	if err := db.Delete(&Contract{}, id).Error; err != nil {
+
+	role, _ := c.Get("role")
+	roleStr, _ := role.(string)
+
+	// legal は削除不可
+	if roleStr == "legal" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "削除権限がありません"})
+		return
+	}
+
+	var contract Contract
+	if err := db.First(&contract, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "契約が見つかりません"})
+		return
+	}
+
+	// sales は自分が依頼した draft 契約のみ削除可
+	if roleStr == "sales" {
+		callerID, _ := c.Get("user_id")
+		callerIDUint, _ := callerID.(uint)
+		if contract.RequesterID == nil || *contract.RequesterID != callerIDUint {
+			c.JSON(http.StatusForbidden, gin.H{"error": "自分が依頼した契約のみ削除できます"})
+			return
+		}
+		if contract.Status != "draft" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "draft 状態の契約のみ削除できます"})
+			return
+		}
+	}
+
+	if err := db.Delete(&contract).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "削除に失敗しました"})
 		return
 	}
@@ -716,6 +783,42 @@ func updateContractHandler(c *gin.Context) {
 		return
 	}
 
+	// status の直接変更は全ロール禁止
+	delete(input, "status")
+
+	role, _ := c.Get("role")
+	roleStr, _ := role.(string)
+
+	switch roleStr {
+	case "sales":
+		// draft / rejected のみ編集可
+		if contract.Status != "draft" && contract.Status != "rejected" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "draft または rejected の契約のみ編集できます"})
+			return
+		}
+		allowed := map[string]bool{
+			"title": true, "client_name": true, "amount": true,
+			"contract_date": true, "start_date": true, "end_date": true,
+			"auto_renewal": true, "summary": true, "folder_id": true, "due_date": true,
+		}
+		for key := range input {
+			if !allowed[key] {
+				delete(input, key)
+			}
+		}
+	case "legal", "legal_manager":
+		allowed := map[string]bool{
+			"title": true, "client_name": true, "amount": true,
+			"contract_date": true, "start_date": true, "end_date": true,
+			"auto_renewal": true, "summary": true, "folder_id": true, "assignee_id": true,
+		}
+		for key := range input {
+			if !allowed[key] {
+				delete(input, key)
+			}
+		}
+	}
+
 	// folder_idが0の場合はNULL（ルートフォルダ）として扱う
 	if v, ok := input["folder_id"]; ok {
 		if f, ok := v.(float64); ok && f == 0 {
@@ -729,6 +832,476 @@ func updateContractHandler(c *gin.Context) {
 	}
 
 	// 更新後のデータを再取得
+	db.First(&contract, id)
+	c.JSON(http.StatusOK, contract)
+}
+
+// --- 審査履歴 / ファイルバージョン管理 ---
+
+// canAccessContract は sales が自部署の契約のみ参照できるかチェックし、
+// アクセス不可なら false を返す（forbidden/not-found のレスポンスも送信する）。
+func canAccessContract(c *gin.Context, contract *Contract) bool {
+	role, _ := c.Get("role")
+	if role == "sales" {
+		deptID, exists := c.Get("department_id")
+		if !exists || deptID == nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "アクセス権限がありません"})
+			return false
+		}
+		deptIDUint, _ := deptID.(uint)
+		if contract.DepartmentID == nil || *contract.DepartmentID != deptIDUint {
+			c.JSON(http.StatusForbidden, gin.H{"error": "アクセス権限がありません"})
+			return false
+		}
+	}
+	return true
+}
+
+// HistoryWithUser は審査履歴に user の name を付加したレスポンス用構造体
+type HistoryWithUser struct {
+	ReviewHistory
+	UserName string `json:"user_name"`
+}
+
+func getContractHistoriesHandler(c *gin.Context) {
+	id := c.Param("id")
+	var contract Contract
+	if err := db.First(&contract, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "契約が見つかりません"})
+		return
+	}
+	if !canAccessContract(c, &contract) {
+		return
+	}
+
+	var rows []struct {
+		ReviewHistory
+		UserName string `gorm:"column:user_name"`
+	}
+	err := db.Table("review_histories").
+		Select("review_histories.*, users.name AS user_name").
+		Joins("LEFT JOIN users ON users.id = review_histories.user_id").
+		Where("review_histories.contract_id = ?", id).
+		Order("review_histories.created_at ASC").
+		Scan(&rows).Error
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "履歴の取得に失敗しました"})
+		return
+	}
+
+	result := make([]HistoryWithUser, 0, len(rows))
+	for _, r := range rows {
+		result = append(result, HistoryWithUser{ReviewHistory: r.ReviewHistory, UserName: r.UserName})
+	}
+	c.JSON(http.StatusOK, gin.H{"histories": result})
+}
+
+func getContractFilesHandler(c *gin.Context) {
+	id := c.Param("id")
+	var contract Contract
+	if err := db.First(&contract, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "契約が見つかりません"})
+		return
+	}
+	if !canAccessContract(c, &contract) {
+		return
+	}
+
+	var files []ContractFile
+	if err := db.Where("contract_id = ?", id).Order("version DESC").Find(&files).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ファイル一覧の取得に失敗しました"})
+		return
+	}
+	c.JSON(http.StatusOK, files)
+}
+
+func uploadContractFileHandler(c *gin.Context) {
+	id := c.Param("id")
+	var contract Contract
+	if err := db.First(&contract, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "契約が見つかりません"})
+		return
+	}
+
+	role, _ := c.Get("role")
+	roleStr, _ := role.(string)
+	callerID, _ := c.Get("user_id")
+	callerIDUint, _ := callerID.(uint)
+
+	// sales は draft/rejected のみアップロード可
+	if roleStr == "sales" {
+		if contract.Status != "draft" && contract.Status != "rejected" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "draft または rejected の契約のみファイルをアップロードできます"})
+			return
+		}
+	}
+
+	fileType := c.PostForm("file_type")
+	if fileType != "pdf" && fileType != "word" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file_type は 'pdf' または 'word' を指定してください"})
+		return
+	}
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file が必要です"})
+		return
+	}
+
+	// 同一 contract_id + file_type の最大 version を取得
+	var maxVersion int
+	db.Model(&ContractFile{}).
+		Where("contract_id = ? AND file_type = ?", contract.ID, fileType).
+		Select("COALESCE(MAX(version), 0)").
+		Scan(&maxVersion)
+	newVersion := maxVersion + 1
+
+	filename := fmt.Sprintf("%d-%s-v%d-%s", contract.ID, fileType, newVersion, file.Filename)
+	savePath := filepath.Join("uploads", filename)
+	if err := c.SaveUploadedFile(file, savePath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ファイルの保存に失敗しました"})
+		return
+	}
+
+	urlPath := "/uploads/" + filename
+	cf := ContractFile{
+		ContractID: contract.ID,
+		Version:    newVersion,
+		FileType:   fileType,
+		Path:       urlPath,
+		Filename:   file.Filename,
+		UploadedBy: &callerIDUint,
+	}
+	if err := db.Create(&cf).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ファイル情報の保存に失敗しました"})
+		return
+	}
+
+	// PDF の場合は contracts.pdf_path / pdf_filename も最新で上書き（既存表示互換）
+	if fileType == "pdf" {
+		if err := db.Model(&contract).Updates(map[string]interface{}{
+			"pdf_path":     urlPath,
+			"pdf_filename": file.Filename,
+		}).Error; err != nil {
+			log.Printf("contracts.pdf_path 更新失敗 (id=%d): %v", contract.ID, err)
+		}
+	}
+
+	c.JSON(http.StatusCreated, cf)
+}
+
+// --- 審査ワークフロー ---
+
+// insertReviewHistory は review_histories にレコードを INSERT するヘルパー
+func insertReviewHistory(contractID, userID uint, action, comment string) {
+	h := ReviewHistory{
+		ContractID: contractID,
+		UserID:     userID,
+		Action:     action,
+		Comment:    comment,
+	}
+	if err := db.Create(&h).Error; err != nil {
+		log.Printf("review_history INSERT 失敗 (contract_id=%d action=%s): %v", contractID, action, err)
+	}
+}
+
+// assignLegalStaff は role='legal' かつ is_active=true のユーザーの中から
+// 担当中（approved/rejected 以外）の契約数が最少の担当者 ID を返す。
+// 該当者がいない場合は nil を返す。
+func assignLegalStaff(contractID uint) (*uint, error) {
+	var legalUsers []User
+	if err := db.Where("role = ? AND is_active = ?", "legal", true).Order("id asc").Find(&legalUsers).Error; err != nil {
+		return nil, err
+	}
+	if len(legalUsers) == 0 {
+		return nil, nil
+	}
+
+	type countRow struct {
+		UserID uint
+		Cnt    int64
+	}
+
+	// 各 legal ユーザーの担当中契約数を取得（approved/rejected 以外）
+	var rows []countRow
+	err := db.Raw(`
+		SELECT u.id AS user_id, COUNT(c.id) AS cnt
+		FROM users u
+		LEFT JOIN contracts c ON c.assignee_id = u.id AND c.status NOT IN ('approved','rejected')
+		WHERE u.role = 'legal' AND u.is_active = 1
+		GROUP BY u.id
+		ORDER BY cnt ASC, u.id ASC
+		LIMIT 1
+	`).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	id := rows[0].UserID
+	return &id, nil
+}
+
+// submitContractHandler: sales が draft/rejected の契約を審査へ提出
+func submitContractHandler(c *gin.Context) {
+	id := c.Param("id")
+	role, _ := c.Get("role")
+	roleStr, _ := role.(string)
+	callerID, _ := c.Get("user_id")
+	callerIDUint, _ := callerID.(uint)
+
+	if roleStr != "sales" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "sales ロールのみ申請できます"})
+		return
+	}
+
+	var contract Contract
+	if err := db.First(&contract, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "契約が見つかりません"})
+		return
+	}
+	if contract.Status != "draft" && contract.Status != "rejected" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "draft または rejected の契約のみ申請できます"})
+		return
+	}
+	if contract.RequesterID == nil || *contract.RequesterID != callerIDUint {
+		c.JSON(http.StatusForbidden, gin.H{"error": "自分が依頼した契約のみ申請できます"})
+		return
+	}
+
+	var input struct {
+		Comment string `json:"comment"`
+		DueDate string `json:"due_date"`
+	}
+	_ = c.ShouldBindJSON(&input)
+
+	now := time.Now()
+	updates := map[string]interface{}{
+		"status":       "pending",
+		"requested_at": now,
+	}
+
+	// rejected からの再申請は review_version をインクリメント
+	if contract.Status == "rejected" {
+		updates["review_version"] = contract.ReviewVersion + 1
+	}
+
+	// due_date のセット
+	if input.DueDate != "" {
+		if t, err := time.Parse("2006-01-02", input.DueDate); err == nil {
+			updates["due_date"] = t
+		}
+	}
+
+	// ラウンドロビンでアサイン
+	assigneeID, err := assignLegalStaff(contract.ID)
+	if err != nil {
+		log.Printf("assignLegalStaff error: %v", err)
+	}
+	updates["assignee_id"] = assigneeID
+
+	if err := db.Model(&contract).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ステータス更新に失敗しました"})
+		return
+	}
+
+	insertReviewHistory(contract.ID, callerIDUint, "pending", input.Comment)
+
+	db.First(&contract, id)
+	c.JSON(http.StatusOK, contract)
+}
+
+// acceptContractHandler: legal（担当者）または legal_manager が pending を受理
+func acceptContractHandler(c *gin.Context) {
+	id := c.Param("id")
+	role, _ := c.Get("role")
+	roleStr, _ := role.(string)
+	callerID, _ := c.Get("user_id")
+	callerIDUint, _ := callerID.(uint)
+
+	if roleStr != "legal" && roleStr != "legal_manager" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "権限がありません"})
+		return
+	}
+
+	var contract Contract
+	if err := db.First(&contract, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "契約が見つかりません"})
+		return
+	}
+	if contract.Status != "pending" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pending の契約のみ受理できます"})
+		return
+	}
+	if roleStr == "legal" && (contract.AssigneeID == nil || *contract.AssigneeID != callerIDUint) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "担当者のみ操作できます"})
+		return
+	}
+
+	if err := db.Model(&contract).Update("status", "accepted").Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ステータス更新に失敗しました"})
+		return
+	}
+	insertReviewHistory(contract.ID, callerIDUint, "accepted", "")
+
+	db.First(&contract, id)
+	c.JSON(http.StatusOK, contract)
+}
+
+// startReviewContractHandler: legal（担当者）または legal_manager が accepted から reviewing へ
+func startReviewContractHandler(c *gin.Context) {
+	id := c.Param("id")
+	role, _ := c.Get("role")
+	roleStr, _ := role.(string)
+	callerID, _ := c.Get("user_id")
+	callerIDUint, _ := callerID.(uint)
+
+	if roleStr != "legal" && roleStr != "legal_manager" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "権限がありません"})
+		return
+	}
+
+	var contract Contract
+	if err := db.First(&contract, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "契約が見つかりません"})
+		return
+	}
+	if contract.Status != "accepted" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "accepted の契約のみ審査開始できます"})
+		return
+	}
+	if roleStr == "legal" && (contract.AssigneeID == nil || *contract.AssigneeID != callerIDUint) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "担当者のみ操作できます"})
+		return
+	}
+
+	if err := db.Model(&contract).Update("status", "reviewing").Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ステータス更新に失敗しました"})
+		return
+	}
+	insertReviewHistory(contract.ID, callerIDUint, "reviewing", "")
+
+	db.First(&contract, id)
+	c.JSON(http.StatusOK, contract)
+}
+
+// requestApprovalContractHandler: legal（担当者）が reviewing から approval_pending へ
+func requestApprovalContractHandler(c *gin.Context) {
+	id := c.Param("id")
+	role, _ := c.Get("role")
+	roleStr, _ := role.(string)
+	callerID, _ := c.Get("user_id")
+	callerIDUint, _ := callerID.(uint)
+
+	if roleStr != "legal" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "legal ロールのみ承認申請できます"})
+		return
+	}
+
+	var contract Contract
+	if err := db.First(&contract, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "契約が見つかりません"})
+		return
+	}
+	if contract.Status != "reviewing" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "reviewing の契約のみ承認申請できます"})
+		return
+	}
+	if contract.AssigneeID == nil || *contract.AssigneeID != callerIDUint {
+		c.JSON(http.StatusForbidden, gin.H{"error": "担当者のみ操作できます"})
+		return
+	}
+
+	var input struct {
+		Comment string `json:"comment"`
+	}
+	_ = c.ShouldBindJSON(&input)
+
+	if err := db.Model(&contract).Update("status", "approval_pending").Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ステータス更新に失敗しました"})
+		return
+	}
+	insertReviewHistory(contract.ID, callerIDUint, "approval_pending", input.Comment)
+
+	db.First(&contract, id)
+	c.JSON(http.StatusOK, contract)
+}
+
+// approveContractHandler: legal_manager が approval_pending を承認
+func approveContractHandler(c *gin.Context) {
+	id := c.Param("id")
+	role, _ := c.Get("role")
+	roleStr, _ := role.(string)
+	callerID, _ := c.Get("user_id")
+	callerIDUint, _ := callerID.(uint)
+
+	if roleStr != "legal_manager" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "legal_manager のみ承認できます"})
+		return
+	}
+
+	var contract Contract
+	if err := db.First(&contract, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "契約が見つかりません"})
+		return
+	}
+	if contract.Status != "approval_pending" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "approval_pending の契約のみ承認できます"})
+		return
+	}
+
+	if err := db.Model(&contract).Update("status", "approved").Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ステータス更新に失敗しました"})
+		return
+	}
+	insertReviewHistory(contract.ID, callerIDUint, "approved", "")
+
+	db.First(&contract, id)
+	c.JSON(http.StatusOK, contract)
+}
+
+// rejectContractHandler: legal（担当者）または legal_manager が reviewing/approval_pending を差し戻し
+func rejectContractHandler(c *gin.Context) {
+	id := c.Param("id")
+	role, _ := c.Get("role")
+	roleStr, _ := role.(string)
+	callerID, _ := c.Get("user_id")
+	callerIDUint, _ := callerID.(uint)
+
+	if roleStr != "legal" && roleStr != "legal_manager" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "権限がありません"})
+		return
+	}
+
+	var input struct {
+		Comment string `json:"comment"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil || input.Comment == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "comment は必須です"})
+		return
+	}
+
+	var contract Contract
+	if err := db.First(&contract, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "契約が見つかりません"})
+		return
+	}
+	if contract.Status != "reviewing" && contract.Status != "approval_pending" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "reviewing または approval_pending の契約のみ差し戻しできます"})
+		return
+	}
+	if roleStr == "legal" && (contract.AssigneeID == nil || *contract.AssigneeID != callerIDUint) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "担当者のみ操作できます"})
+		return
+	}
+
+	if err := db.Model(&contract).Update("status", "rejected").Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ステータス更新に失敗しました"})
+		return
+	}
+	insertReviewHistory(contract.ID, callerIDUint, "rejected", input.Comment)
+
 	db.First(&contract, id)
 	c.JSON(http.StatusOK, contract)
 }
