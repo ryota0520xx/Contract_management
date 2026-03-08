@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -200,6 +203,188 @@ func ensureUploadsDir() {
 	os.MkdirAll("uploads", 0755)
 }
 
+// --- JWT認証 ---
+
+// jwtClaims はJWTのペイロード構造体
+type jwtClaims struct {
+	UserID       uint   `json:"user_id"`
+	Email        string `json:"email"`
+	Role         string `json:"role"`
+	DepartmentID *uint  `json:"department_id"`
+	Exp          int64  `json:"exp"`
+}
+
+// base64urlEncode はRFC 4648 §5のbase64url（パディングなし）エンコード
+func base64urlEncode(data []byte) string {
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+// generateToken はHS256署名のJWTを生成する
+func generateToken(user User) (string, error) {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		return "", fmt.Errorf("JWT_SECRET environment variable is not set")
+	}
+
+	// Header
+	headerJSON, _ := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
+	header := base64urlEncode(headerJSON)
+
+	// Payload
+	claims := jwtClaims{
+		UserID:       user.ID,
+		Email:        user.Email,
+		Role:         user.Role,
+		DepartmentID: user.DepartmentID,
+		Exp:          time.Now().Add(24 * time.Hour).Unix(),
+	}
+	payloadJSON, _ := json.Marshal(claims)
+	payload := base64urlEncode(payloadJSON)
+
+	// Signature
+	signingInput := header + "." + payload
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(signingInput))
+	sig := base64urlEncode(mac.Sum(nil))
+
+	return signingInput + "." + sig, nil
+}
+
+// verifyToken はJWTを検証してclaimsを返す
+func verifyToken(tokenStr string) (*jwtClaims, error) {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		return nil, fmt.Errorf("JWT_SECRET environment variable is not set")
+	}
+
+	parts := strings.Split(tokenStr, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid token format")
+	}
+
+	// 署名を検証
+	signingInput := parts[0] + "." + parts[1]
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(signingInput))
+	expectedSig := base64urlEncode(mac.Sum(nil))
+	if !hmac.Equal([]byte(parts[2]), []byte(expectedSig)) {
+		return nil, fmt.Errorf("invalid token signature")
+	}
+
+	// ペイロードをデコード
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid token payload")
+	}
+
+	var claims jwtClaims
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return nil, fmt.Errorf("failed to parse token payload")
+	}
+
+	// 有効期限チェック
+	if time.Now().Unix() > claims.Exp {
+		return nil, fmt.Errorf("token expired")
+	}
+
+	return &claims, nil
+}
+
+// AuthMiddleware はBearerトークンを検証してContextにユーザー情報をセットする
+func AuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "認証トークンがありません"})
+			return
+		}
+
+		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+		claims, err := verifyToken(tokenStr)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "無効なトークンです: " + err.Error()})
+			return
+		}
+
+		c.Set("user_id", claims.UserID)
+		c.Set("role", claims.Role)
+		c.Set("department_id", claims.DepartmentID)
+		c.Next()
+	}
+}
+
+// RequireRole は指定ロールを持つユーザーのみ通過を許可する（AuthMiddlewareの後に使う）
+func RequireRole(roles ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		role, _ := c.Get("role")
+		roleStr, _ := role.(string)
+		for _, r := range roles {
+			if r == roleStr {
+				c.Next()
+				return
+			}
+		}
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "この操作を行う権限がありません"})
+	}
+}
+
+// --- 認証ハンドラー ---
+
+func loginHandler(c *gin.Context) {
+	var input struct {
+		Email    string `json:"email" binding:"required"`
+		Password string `json:"password" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var user User
+	if err := db.Where("email = ? AND is_active = ?", input.Email, true).First(&user).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "メールアドレスまたはパスワードが正しくありません"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "メールアドレスまたはパスワードが正しくありません"})
+		return
+	}
+
+	token, err := generateToken(user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "トークンの生成に失敗しました"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"token": token,
+		"user": gin.H{
+			"id":            user.ID,
+			"name":          user.Name,
+			"email":         user.Email,
+			"role":          user.Role,
+			"department_id": user.DepartmentID,
+		},
+	})
+}
+
+func meHandler(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	var user User
+	if err := db.First(&user, userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "ユーザーが見つかりません"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"id":            user.ID,
+		"name":          user.Name,
+		"email":         user.Email,
+		"role":          user.Role,
+		"department_id": user.DepartmentID,
+	})
+}
+
 func seedDefaultFolders() {
 	var count int64
 	db.Model(&Folder{}).Count(&count)
@@ -217,27 +402,38 @@ func seedDefaultFolders() {
 func setupRouter() *gin.Engine {
 	r := gin.Default()
 
-	// 追加：同じフォルダにある静的ファイル（HTMLなど）を使えるようにする
+	// 静的ファイル
 	r.StaticFile("/", "./index.html")
 	r.StaticFile("/index.html", "./index.html")
 	r.StaticFile("/contract_detail.html", "./contract_detail.html")
-	r.Static("/uploads", "./uploads") // アップロードされたファイルへのアクセスを許可
+	r.Static("/uploads", "./uploads")
 
-	// ルーティング
+	// 認証不要エンドポイント
 	r.GET("/hello", helloHandler)
-	r.GET("/contracts", getContractsHandler)
-	r.GET("/contracts/:id", getContractDetailHandler)
-	r.POST("/contracts", createContractHandler)
-	r.DELETE("/contracts/:id", deleteContractHandler)
-	r.PUT("/contracts/:id", updateContractHandler)
-	r.POST("/api/analyze", analyzeContractHandler)
-	r.POST("/contracts/:id/analyze", reanalyzeContractHandler)
+	r.POST("/auth/login", loginHandler)
 
-	// フォルダ関連のルーティング
-	r.GET("/folders", getFoldersHandler)
-	r.POST("/folders", createFolderHandler)
-	r.PUT("/folders/:id", updateFolderHandler)
-	r.DELETE("/folders/:id", deleteFolderHandler)
+	// 認証必須エンドポイント
+	auth := r.Group("/", AuthMiddleware())
+	{
+		auth.POST("/auth/me", meHandler)
+
+		// 契約関連
+		auth.GET("/contracts", getContractsHandler)
+		auth.GET("/contracts/:id", getContractDetailHandler)
+		auth.POST("/contracts", createContractHandler)
+		auth.DELETE("/contracts/:id", deleteContractHandler)
+		auth.PUT("/contracts/:id", updateContractHandler)
+		auth.POST("/contracts/:id/analyze", reanalyzeContractHandler)
+
+		// AI解析
+		auth.POST("/api/analyze", analyzeContractHandler)
+
+		// フォルダ関連
+		auth.GET("/folders", getFoldersHandler)
+		auth.POST("/folders", createFolderHandler)
+		auth.PUT("/folders/:id", updateFolderHandler)
+		auth.DELETE("/folders/:id", deleteFolderHandler)
+	}
 
 	return r
 }
