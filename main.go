@@ -166,6 +166,7 @@ func initDB() {
 	db.AutoMigrate(&Contract{}, &Folder{}, &Department{}, &User{}, &ContractFile{}, &ReviewHistory{})
 	migrateExistingPDFs()
 	seedDefaultFolders()
+	seedAdminUser()
 }
 
 func migrateExistingPDFs() {
@@ -399,6 +400,175 @@ func seedDefaultFolders() {
 	}
 }
 
+func seedAdminUser() {
+	var count int64
+	db.Model(&User{}).Count(&count)
+	if count > 0 {
+		return
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte("admin1234"), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("管理者ユーザーのパスワードハッシュ化に失敗しました: %v", err)
+		return
+	}
+	admin := User{
+		Name:     "システム管理者",
+		Email:    "admin@example.com",
+		Password: string(hashed),
+		Role:     "legal_manager",
+		IsActive: true,
+	}
+	if err := db.Create(&admin).Error; err != nil {
+		log.Printf("管理者ユーザーの作成に失敗しました: %v", err)
+		return
+	}
+	log.Println("初期管理者ユーザー (admin@example.com) を作成しました")
+}
+
+// --- 部署ハンドラー ---
+
+func getDepartmentsHandler(c *gin.Context) {
+	var departments []Department
+	if err := db.Find(&departments).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "部署の取得に失敗しました"})
+		return
+	}
+	c.JSON(http.StatusOK, departments)
+}
+
+func createDepartmentHandler(c *gin.Context) {
+	var dept Department
+	if err := c.ShouldBindJSON(&dept); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := db.Create(&dept).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "部署の作成に失敗しました"})
+		return
+	}
+	c.JSON(http.StatusCreated, dept)
+}
+
+func updateDepartmentHandler(c *gin.Context) {
+	id := c.Param("id")
+	var dept Department
+	if err := db.First(&dept, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "部署が見つかりません"})
+		return
+	}
+	var input map[string]interface{}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := db.Model(&dept).Updates(input).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "部署の更新に失敗しました"})
+		return
+	}
+	db.First(&dept, id)
+	c.JSON(http.StatusOK, dept)
+}
+
+// --- ユーザーハンドラー ---
+
+func getUsersHandler(c *gin.Context) {
+	var users []User
+	if err := db.Find(&users).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ユーザーの取得に失敗しました"})
+		return
+	}
+	c.JSON(http.StatusOK, users)
+}
+
+func createUserHandler(c *gin.Context) {
+	var input struct {
+		Name         string `json:"name" binding:"required"`
+		Email        string `json:"email" binding:"required"`
+		Password     string `json:"password" binding:"required"`
+		Role         string `json:"role" binding:"required"`
+		DepartmentID *uint  `json:"department_id"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "パスワードのハッシュ化に失敗しました"})
+		return
+	}
+
+	user := User{
+		Name:         input.Name,
+		Email:        input.Email,
+		Password:     string(hashed),
+		Role:         input.Role,
+		DepartmentID: input.DepartmentID,
+		IsActive:     true,
+	}
+	if err := db.Create(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ユーザーの作成に失敗しました"})
+		return
+	}
+	c.JSON(http.StatusCreated, user)
+}
+
+func updateUserHandler(c *gin.Context) {
+	id := c.Param("id")
+	var target User
+	if err := db.First(&target, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "ユーザーが見つかりません"})
+		return
+	}
+
+	callerRole, _ := c.Get("role")
+	callerRoleStr, _ := callerRole.(string)
+	callerID, _ := c.Get("user_id")
+	callerIDUint, _ := callerID.(uint)
+
+	var input map[string]interface{}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// legal_manager 以外が自分以外を更新しようとした場合は禁止
+	if callerRoleStr != "legal_manager" && callerIDUint != target.ID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "他のユーザーを更新する権限がありません"})
+		return
+	}
+
+	// legal_manager 以外は name と password 以外の変更を禁止
+	if callerRoleStr != "legal_manager" {
+		for key := range input {
+			if key != "name" && key != "password" {
+				delete(input, key)
+			}
+		}
+	}
+
+	// password が含まれる場合は bcrypt ハッシュ化
+	if pw, ok := input["password"].(string); ok && pw != "" {
+		hashed, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "パスワードのハッシュ化に失敗しました"})
+			return
+		}
+		input["password"] = string(hashed)
+	} else {
+		delete(input, "password")
+	}
+
+	if err := db.Model(&target).Updates(input).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ユーザーの更新に失敗しました"})
+		return
+	}
+	db.First(&target, id)
+	c.JSON(http.StatusOK, target)
+}
+
 func setupRouter() *gin.Engine {
 	r := gin.Default()
 
@@ -433,6 +603,16 @@ func setupRouter() *gin.Engine {
 		auth.POST("/folders", createFolderHandler)
 		auth.PUT("/folders/:id", updateFolderHandler)
 		auth.DELETE("/folders/:id", deleteFolderHandler)
+
+		// 部署関連（GET は全ロール可、POST/PUT は legal_manager のみ）
+		auth.GET("/departments", getDepartmentsHandler)
+		auth.POST("/departments", RequireRole("legal_manager"), createDepartmentHandler)
+		auth.PUT("/departments/:id", RequireRole("legal_manager"), updateDepartmentHandler)
+
+		// ユーザー関連（GET/POST は legal_manager のみ、PUT は権限チェックをハンドラー内で行う）
+		auth.GET("/users", RequireRole("legal_manager"), getUsersHandler)
+		auth.POST("/users", RequireRole("legal_manager"), createUserHandler)
+		auth.PUT("/users/:id", updateUserHandler)
 	}
 
 	return r
