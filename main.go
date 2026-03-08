@@ -31,6 +31,50 @@ var httpClient = &http.Client{
 	Timeout: 30 * time.Second,
 }
 
+// slackWebhookURL は起動時に環境変数から取得する
+var slackWebhookURL string
+
+// sendSlackNotification は Incoming Webhook に message を POST する。
+// 呼び出し元は goroutine で呼ぶこと（メイン処理をブロックしない）。
+func sendSlackNotification(webhookURL, message string) error {
+	payload, err := json.Marshal(map[string]string{"text": message})
+	if err != nil {
+		return err
+	}
+	resp, err := httpClient.Post(webhookURL, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("slack webhook returned %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// notifySlack は Webhook URL が設定されていれば goroutine で通知する。
+func notifySlack(message string) {
+	if slackWebhookURL == "" {
+		log.Println("SLACK_WEBHOOK_URL not set, skipping")
+		return
+	}
+	go func() {
+		if err := sendSlackNotification(slackWebhookURL, message); err != nil {
+			log.Printf("slack notification error: %v", err)
+		}
+	}()
+}
+
+// userName は ID からユーザー名を取得する（取得失敗時は空文字）。
+func userName(id uint) string {
+	var u User
+	if err := db.Select("name").First(&u, id).Error; err != nil {
+		return ""
+	}
+	return u.Name
+}
+
 // 定数定義
 const defaultGeminiModel = "gemini-2.5-flash"
 const defaultPort = "8080"
@@ -107,6 +151,7 @@ func main() {
 	loadEnv()
 	initDB()
 	ensureUploadsDir()
+	slackWebhookURL = os.Getenv("SLACK_WEBHOOK_URL")
 
 	r := setupRouter()
 
@@ -1109,6 +1154,18 @@ func submitContractHandler(c *gin.Context) {
 	insertReviewHistory(contract.ID, callerIDUint, "pending", input.Comment)
 
 	db.First(&contract, id)
+
+	// Slack通知（submit）: アサインされた法務担当者へ
+	{
+		requesterName := userName(callerIDUint)
+		dueDateStr := ""
+		if contract.DueDate != nil {
+			dueDateStr = contract.DueDate.Format("2006-01-02")
+		}
+		notifySlack(fmt.Sprintf("【新規審査依頼】%s の審査依頼が届きました。依頼者: %s 希望期限: %s",
+			contract.Title, requesterName, dueDateStr))
+	}
+
 	c.JSON(http.StatusOK, contract)
 }
 
@@ -1146,6 +1203,11 @@ func acceptContractHandler(c *gin.Context) {
 	insertReviewHistory(contract.ID, callerIDUint, "accepted", "")
 
 	db.First(&contract, id)
+
+	// Slack通知（accept）: 依頼者へ
+	notifySlack(fmt.Sprintf("【受付完了】%s の審査を受け付けました。担当: %s",
+		contract.Title, userName(callerIDUint)))
+
 	c.JSON(http.StatusOK, contract)
 }
 
@@ -1225,6 +1287,11 @@ func requestApprovalContractHandler(c *gin.Context) {
 	insertReviewHistory(contract.ID, callerIDUint, "approval_pending", input.Comment)
 
 	db.First(&contract, id)
+
+	// Slack通知（request_approval）: 法務マネージャーへ
+	notifySlack(fmt.Sprintf("【承認依頼】%s の最終承認をお願いします。担当: %s",
+		contract.Title, userName(callerIDUint)))
+
 	c.JSON(http.StatusOK, contract)
 }
 
@@ -1258,6 +1325,10 @@ func approveContractHandler(c *gin.Context) {
 	insertReviewHistory(contract.ID, callerIDUint, "approved", "")
 
 	db.First(&contract, id)
+
+	// Slack通知（approve）: 依頼者 + 担当法務へ
+	notifySlack(fmt.Sprintf("【承認完了】%s が承認されました。", contract.Title))
+
 	c.JSON(http.StatusOK, contract)
 }
 
@@ -1303,6 +1374,11 @@ func rejectContractHandler(c *gin.Context) {
 	insertReviewHistory(contract.ID, callerIDUint, "rejected", input.Comment)
 
 	db.First(&contract, id)
+
+	// Slack通知（reject）: 依頼者 + 法務マネージャーへ
+	notifySlack(fmt.Sprintf("【差し戻し】%s が差し戻されました。理由: %s",
+		contract.Title, input.Comment))
+
 	c.JSON(http.StatusOK, contract)
 }
 
