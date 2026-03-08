@@ -255,6 +255,71 @@ type Contract struct {
 	ReviewVersion int        `gorm:"column:review_version;default:0" json:"review_version"`
 }
 
+// --- 契約期限アラートジョブ ---
+
+func runDeadlineAlerts() {
+	now := time.Now()
+
+	// ① 審査期限アラート: due_date が今日〜3日後で未完了の契約
+	deadline3 := now.Add(3 * 24 * time.Hour)
+	var dueSoonContracts []Contract
+	db.Where("status NOT IN ? AND due_date IS NOT NULL AND due_date >= ? AND due_date <= ?",
+		[]string{"approved", "rejected"}, now, deadline3).
+		Find(&dueSoonContracts)
+
+	lmEmails := legalManagerEmails() // 一度だけ取得して再利用
+	for _, c := range dueSoonContracts {
+		days := int(c.DueDate.Sub(now).Hours() / 24)
+		msg := fmt.Sprintf("【期限アラート】%s の審査期限まであと%d日です。", c.Title, days)
+		subject := fmt.Sprintf("【期限アラート】%s", c.Title)
+		notifySlack(msg)
+		if c.AssigneeID != nil {
+			notifyEmail(userEmail(*c.AssigneeID), subject, msg)
+		}
+		notifyEmailMulti(lmEmails, subject, msg)
+	}
+
+	// ② 契約終了アラート: status=approved かつ end_date が今日〜30日後
+	// end_date は YYYY-MM-DD 文字列なので辞書順比較が成立する
+	today := now.Format("2006-01-02")
+	limit30 := now.Add(30 * 24 * time.Hour).Format("2006-01-02")
+	var endingSoonContracts []Contract
+	db.Where("status = ? AND end_date != '' AND end_date >= ? AND end_date <= ?",
+		"approved", today, limit30).
+		Find(&endingSoonContracts)
+
+	for _, c := range endingSoonContracts {
+		endDate, err := time.Parse("2006-01-02", c.EndDate)
+		if err != nil {
+			continue
+		}
+		days := int(endDate.Sub(now).Hours() / 24)
+		autoRenewal := "なし"
+		if c.AutoRenewal {
+			autoRenewal = "あり"
+		}
+		msg := fmt.Sprintf("【契約終了アラート】%s の契約終了まであと%d日です。自動更新: %s",
+			c.Title, days, autoRenewal)
+		subject := fmt.Sprintf("【契約終了アラート】%s", c.Title)
+		notifySlack(msg)
+		if c.RequesterID != nil {
+			notifyEmail(userEmail(*c.RequesterID), subject, msg)
+		}
+		notifyEmailMulti(lmEmails, subject, msg)
+	}
+}
+
+// startDeadlineAlertJob は起動直後に一度実行した後、24時間ごとに期限アラートをチェックする。
+// main() から go startDeadlineAlertJob() で呼び出すこと。
+func startDeadlineAlertJob() {
+	runDeadlineAlerts()
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		runDeadlineAlerts()
+	}
+}
+
 func main() {
 	// .envファイルを読み込む（存在する場合）
 	loadEnv()
@@ -276,6 +341,7 @@ func main() {
 	if port == "" {
 		port = defaultPort
 	}
+	go startDeadlineAlertJob()
 	log.Printf("Server is running on port %s", port)
 	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
