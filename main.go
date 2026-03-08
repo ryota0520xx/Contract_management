@@ -628,6 +628,16 @@ func getContractsHandler(c *gin.Context) {
 	var contracts []Contract
 	query := db.Model(&Contract{})
 
+	// sales ロールは自分の部署の契約のみ参照可
+	if role, _ := c.Get("role"); role == "sales" {
+		if deptID, exists := c.Get("department_id"); exists && deptID != nil {
+			query = query.Where("department_id = ?", deptID)
+		} else {
+			// 部署未設定の sales は何も返さない
+			query = query.Where("1 = 0")
+		}
+	}
+
 	// フィルタリング
 	if title := c.Query("title"); title != "" {
 		query = query.Where("title LIKE ?", "%"+title+"%")
@@ -670,6 +680,20 @@ func createContractHandler(c *gin.Context) {
 		newContract.FolderID = nil
 	}
 
+	// Context から requester_id / department_id を自動セット
+	if uid, exists := c.Get("user_id"); exists {
+		if v, ok := uid.(uint); ok {
+			newContract.RequesterID = &v
+		}
+	}
+	if deptID, exists := c.Get("department_id"); exists && deptID != nil {
+		if v, ok := deptID.(uint); ok {
+			newContract.DepartmentID = &v
+		}
+	}
+	// status は常に draft で登録
+	newContract.Status = "draft"
+
 	var pdfPath, pdfFilename string
 
 	file, err := c.FormFile("pdf")
@@ -694,7 +718,37 @@ func createContractHandler(c *gin.Context) {
 
 func deleteContractHandler(c *gin.Context) {
 	id := c.Param("id")
-	if err := db.Delete(&Contract{}, id).Error; err != nil {
+
+	role, _ := c.Get("role")
+	roleStr, _ := role.(string)
+
+	// legal は削除不可
+	if roleStr == "legal" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "削除権限がありません"})
+		return
+	}
+
+	var contract Contract
+	if err := db.First(&contract, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "契約が見つかりません"})
+		return
+	}
+
+	// sales は自分が依頼した draft 契約のみ削除可
+	if roleStr == "sales" {
+		callerID, _ := c.Get("user_id")
+		callerIDUint, _ := callerID.(uint)
+		if contract.RequesterID == nil || *contract.RequesterID != callerIDUint {
+			c.JSON(http.StatusForbidden, gin.H{"error": "自分が依頼した契約のみ削除できます"})
+			return
+		}
+		if contract.Status != "draft" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "draft 状態の契約のみ削除できます"})
+			return
+		}
+	}
+
+	if err := db.Delete(&contract).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "削除に失敗しました"})
 		return
 	}
@@ -714,6 +768,42 @@ func updateContractHandler(c *gin.Context) {
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// status の直接変更は全ロール禁止
+	delete(input, "status")
+
+	role, _ := c.Get("role")
+	roleStr, _ := role.(string)
+
+	switch roleStr {
+	case "sales":
+		// draft / rejected のみ編集可
+		if contract.Status != "draft" && contract.Status != "rejected" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "draft または rejected の契約のみ編集できます"})
+			return
+		}
+		allowed := map[string]bool{
+			"title": true, "client_name": true, "amount": true,
+			"contract_date": true, "start_date": true, "end_date": true,
+			"auto_renewal": true, "summary": true, "folder_id": true, "due_date": true,
+		}
+		for key := range input {
+			if !allowed[key] {
+				delete(input, key)
+			}
+		}
+	case "legal", "legal_manager":
+		allowed := map[string]bool{
+			"title": true, "client_name": true, "amount": true,
+			"contract_date": true, "start_date": true, "end_date": true,
+			"auto_renewal": true, "summary": true, "folder_id": true, "assignee_id": true,
+		}
+		for key := range input {
+			if !allowed[key] {
+				delete(input, key)
+			}
+		}
 	}
 
 	// folder_idが0の場合はNULL（ルートフォルダ）として扱う
