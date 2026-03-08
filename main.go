@@ -33,26 +33,70 @@ const defaultGeminiModel = "gemini-2.5-flash"
 const defaultPort = "8080"
 
 type Folder struct {
-	ID       uint   `gorm:"primaryKey" json:"id"`
-	Name     string `gorm:"column:name" json:"name"`
-	ParentID *uint  `gorm:"column:parent_id" json:"parent_id"`
-	SortOrder int    `gorm:"column:sort_order;default:0" json:"sort_order"`
-	Children []*Folder `gorm:"-" json:"children,omitempty"`
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Name      string    `gorm:"column:name" json:"name"`
+	ParentID  *uint     `gorm:"column:parent_id" json:"parent_id"`
+	SortOrder int       `gorm:"column:sort_order;default:0" json:"sort_order"`
+	Children  []*Folder `gorm:"-" json:"children,omitempty"`
+}
+
+type Department struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Name      string    `gorm:"column:name" json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type User struct {
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	Name         string    `gorm:"column:name" json:"name"`
+	Email        string    `gorm:"column:email;uniqueIndex" json:"email"`
+	Password     string    `gorm:"column:password" json:"-"` // レスポンスには含めない
+	Role         string    `gorm:"column:role" json:"role"`  // 'sales' | 'legal' | 'legal_manager'
+	DepartmentID *uint     `gorm:"column:department_id" json:"department_id"`
+	IsActive     bool      `gorm:"column:is_active;default:true" json:"is_active"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type ContractFile struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	ContractID uint      `gorm:"column:contract_id" json:"contract_id"`
+	Version    int       `gorm:"column:version" json:"version"`
+	FileType   string    `gorm:"column:file_type" json:"file_type"` // 'pdf' | 'word'
+	Path       string    `gorm:"column:path" json:"path"`
+	Filename   string    `gorm:"column:filename" json:"filename"`
+	UploadedBy *uint     `gorm:"column:uploaded_by" json:"uploaded_by"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type ReviewHistory struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	ContractID uint      `gorm:"column:contract_id" json:"contract_id"`
+	UserID     uint      `gorm:"column:user_id" json:"user_id"`
+	Action     string    `gorm:"column:action" json:"action"`
+	Comment    string    `gorm:"column:comment" json:"comment"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type Contract struct {
-	ID           uint   `gorm:"primaryKey" json:"id"`
-	Title        string `gorm:"column:title" json:"title" form:"title"`
-	ClientName   string `gorm:"column:client_name" json:"client_name" form:"client_name"`
-	Amount       int    `gorm:"column:amount" json:"amount" form:"amount"`
-	ContractDate string `gorm:"column:contract_date" json:"contract_date" form:"contract_date"` // 契約締結日
-	StartDate    string `gorm:"column:start_date" json:"start_date" form:"start_date"`       // 契約開始日
-	EndDate      string `gorm:"column:end_date" json:"end_date" form:"end_date"`           // 契約終了日
-	AutoRenewal  bool   `gorm:"column:auto_renewal" json:"auto_renewal" form:"auto_renewal"`   // 自動更新有無
-	PDFPath      string `gorm:"column:pdf_path" json:"pdf_path"`
-	PDFFilename  string `gorm:"column:pdf_filename" json:"pdf_filename"`
-	FolderID     *uint  `gorm:"column:folder_id" json:"folder_id" form:"folder_id"`
-	Summary      string `gorm:"column:summary" json:"summary" form:"summary"`
+	ID            uint       `gorm:"primaryKey" json:"id"`
+	Title         string     `gorm:"column:title" json:"title" form:"title"`
+	ClientName    string     `gorm:"column:client_name" json:"client_name" form:"client_name"`
+	Amount        int        `gorm:"column:amount" json:"amount" form:"amount"`
+	ContractDate  string     `gorm:"column:contract_date" json:"contract_date" form:"contract_date"` // 契約締結日
+	StartDate     string     `gorm:"column:start_date" json:"start_date" form:"start_date"`         // 契約開始日
+	EndDate       string     `gorm:"column:end_date" json:"end_date" form:"end_date"`               // 契約終了日
+	AutoRenewal   bool       `gorm:"column:auto_renewal" json:"auto_renewal" form:"auto_renewal"`   // 自動更新有無
+	PDFPath       string     `gorm:"column:pdf_path" json:"pdf_path"`
+	PDFFilename   string     `gorm:"column:pdf_filename" json:"pdf_filename"`
+	FolderID      *uint      `gorm:"column:folder_id" json:"folder_id" form:"folder_id"`
+	Summary       string     `gorm:"column:summary" json:"summary" form:"summary"`
+	Status        string     `gorm:"column:status;default:draft" json:"status"`
+	RequesterID   *uint      `gorm:"column:requester_id" json:"requester_id"`
+	AssigneeID    *uint      `gorm:"column:assignee_id" json:"assignee_id"`
+	DepartmentID  *uint      `gorm:"column:department_id" json:"department_id"`
+	RequestedAt   *time.Time `gorm:"column:requested_at" json:"requested_at"`
+	DueDate       *time.Time `gorm:"column:due_date" json:"due_date"`
+	ReviewVersion int        `gorm:"column:review_version;default:0" json:"review_version"`
 }
 
 func main() {
@@ -116,8 +160,39 @@ func initDB() {
 	sqlDB.SetMaxIdleConns(5)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
-	db.AutoMigrate(&Contract{}, &Folder{})
+	db.AutoMigrate(&Contract{}, &Folder{}, &Department{}, &User{}, &ContractFile{}, &ReviewHistory{})
+	migrateExistingPDFs()
 	seedDefaultFolders()
+}
+
+func migrateExistingPDFs() {
+	// 移行済みかどうかを contract_files にレコードが1件以上あるかで判定
+	var count int64
+	db.Model(&ContractFile{}).Count(&count)
+	if count > 0 {
+		return
+	}
+
+	// pdf_path が設定されている契約を取得
+	var contracts []Contract
+	db.Where("pdf_path != ''").Find(&contracts)
+	if len(contracts) == 0 {
+		return
+	}
+
+	for _, c := range contracts {
+		cf := ContractFile{
+			ContractID: c.ID,
+			Version:    1,
+			FileType:   "pdf",
+			Path:       c.PDFPath,
+			Filename:   c.PDFFilename,
+		}
+		if err := db.Create(&cf).Error; err != nil {
+			log.Printf("既存PDFの移行に失敗しました (contract_id=%d): %v", c.ID, err)
+		}
+	}
+	log.Printf("既存PDFを contract_files テーブルに移行しました（%d件）", len(contracts))
 }
 
 func ensureUploadsDir() {
