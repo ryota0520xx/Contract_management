@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -33,26 +36,70 @@ const defaultGeminiModel = "gemini-2.5-flash"
 const defaultPort = "8080"
 
 type Folder struct {
-	ID       uint   `gorm:"primaryKey" json:"id"`
-	Name     string `gorm:"column:name" json:"name"`
-	ParentID *uint  `gorm:"column:parent_id" json:"parent_id"`
-	SortOrder int    `gorm:"column:sort_order;default:0" json:"sort_order"`
-	Children []*Folder `gorm:"-" json:"children,omitempty"`
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Name      string    `gorm:"column:name" json:"name"`
+	ParentID  *uint     `gorm:"column:parent_id" json:"parent_id"`
+	SortOrder int       `gorm:"column:sort_order;default:0" json:"sort_order"`
+	Children  []*Folder `gorm:"-" json:"children,omitempty"`
+}
+
+type Department struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Name      string    `gorm:"column:name" json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type User struct {
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	Name         string    `gorm:"column:name" json:"name"`
+	Email        string    `gorm:"column:email;uniqueIndex" json:"email"`
+	Password     string    `gorm:"column:password" json:"-"` // レスポンスには含めない
+	Role         string    `gorm:"column:role" json:"role"`  // 'sales' | 'legal' | 'legal_manager'
+	DepartmentID *uint     `gorm:"column:department_id" json:"department_id"`
+	IsActive     bool      `gorm:"column:is_active;default:true" json:"is_active"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type ContractFile struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	ContractID uint      `gorm:"column:contract_id" json:"contract_id"`
+	Version    int       `gorm:"column:version" json:"version"`
+	FileType   string    `gorm:"column:file_type" json:"file_type"` // 'pdf' | 'word'
+	Path       string    `gorm:"column:path" json:"path"`
+	Filename   string    `gorm:"column:filename" json:"filename"`
+	UploadedBy *uint     `gorm:"column:uploaded_by" json:"uploaded_by"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type ReviewHistory struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	ContractID uint      `gorm:"column:contract_id" json:"contract_id"`
+	UserID     uint      `gorm:"column:user_id" json:"user_id"`
+	Action     string    `gorm:"column:action" json:"action"`
+	Comment    string    `gorm:"column:comment" json:"comment"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type Contract struct {
-	ID           uint   `gorm:"primaryKey" json:"id"`
-	Title        string `gorm:"column:title" json:"title" form:"title"`
-	ClientName   string `gorm:"column:client_name" json:"client_name" form:"client_name"`
-	Amount       int    `gorm:"column:amount" json:"amount" form:"amount"`
-	ContractDate string `gorm:"column:contract_date" json:"contract_date" form:"contract_date"` // 契約締結日
-	StartDate    string `gorm:"column:start_date" json:"start_date" form:"start_date"`       // 契約開始日
-	EndDate      string `gorm:"column:end_date" json:"end_date" form:"end_date"`           // 契約終了日
-	AutoRenewal  bool   `gorm:"column:auto_renewal" json:"auto_renewal" form:"auto_renewal"`   // 自動更新有無
-	PDFPath      string `gorm:"column:pdf_path" json:"pdf_path"`
-	PDFFilename  string `gorm:"column:pdf_filename" json:"pdf_filename"`
-	FolderID     *uint  `gorm:"column:folder_id" json:"folder_id" form:"folder_id"`
-	Summary      string `gorm:"column:summary" json:"summary" form:"summary"`
+	ID            uint       `gorm:"primaryKey" json:"id"`
+	Title         string     `gorm:"column:title" json:"title" form:"title"`
+	ClientName    string     `gorm:"column:client_name" json:"client_name" form:"client_name"`
+	Amount        int        `gorm:"column:amount" json:"amount" form:"amount"`
+	ContractDate  string     `gorm:"column:contract_date" json:"contract_date" form:"contract_date"` // 契約締結日
+	StartDate     string     `gorm:"column:start_date" json:"start_date" form:"start_date"`         // 契約開始日
+	EndDate       string     `gorm:"column:end_date" json:"end_date" form:"end_date"`               // 契約終了日
+	AutoRenewal   bool       `gorm:"column:auto_renewal" json:"auto_renewal" form:"auto_renewal"`   // 自動更新有無
+	PDFPath       string     `gorm:"column:pdf_path" json:"pdf_path"`
+	PDFFilename   string     `gorm:"column:pdf_filename" json:"pdf_filename"`
+	FolderID      *uint      `gorm:"column:folder_id" json:"folder_id" form:"folder_id"`
+	Summary       string     `gorm:"column:summary" json:"summary" form:"summary"`
+	Status        string     `gorm:"column:status;default:draft" json:"status"`
+	RequesterID   *uint      `gorm:"column:requester_id" json:"requester_id"`
+	AssigneeID    *uint      `gorm:"column:assignee_id" json:"assignee_id"`
+	DepartmentID  *uint      `gorm:"column:department_id" json:"department_id"`
+	RequestedAt   *time.Time `gorm:"column:requested_at" json:"requested_at"`
+	DueDate       *time.Time `gorm:"column:due_date" json:"due_date"`
+	ReviewVersion int        `gorm:"column:review_version;default:0" json:"review_version"`
 }
 
 func main() {
@@ -116,13 +163,227 @@ func initDB() {
 	sqlDB.SetMaxIdleConns(5)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
-	db.AutoMigrate(&Contract{}, &Folder{})
+	db.AutoMigrate(&Contract{}, &Folder{}, &Department{}, &User{}, &ContractFile{}, &ReviewHistory{})
+	migrateExistingPDFs()
 	seedDefaultFolders()
+	seedAdminUser()
+}
+
+func migrateExistingPDFs() {
+	// 移行済みかどうかを contract_files にレコードが1件以上あるかで判定
+	var count int64
+	db.Model(&ContractFile{}).Count(&count)
+	if count > 0 {
+		return
+	}
+
+	// pdf_path が設定されている契約を取得
+	var contracts []Contract
+	db.Where("pdf_path != ''").Find(&contracts)
+	if len(contracts) == 0 {
+		return
+	}
+
+	for _, c := range contracts {
+		cf := ContractFile{
+			ContractID: c.ID,
+			Version:    1,
+			FileType:   "pdf",
+			Path:       c.PDFPath,
+			Filename:   c.PDFFilename,
+		}
+		if err := db.Create(&cf).Error; err != nil {
+			log.Printf("既存PDFの移行に失敗しました (contract_id=%d): %v", c.ID, err)
+		}
+	}
+	log.Printf("既存PDFを contract_files テーブルに移行しました（%d件）", len(contracts))
 }
 
 func ensureUploadsDir() {
 	// アップロード保存用のディレクトリを作成
 	os.MkdirAll("uploads", 0755)
+}
+
+// --- JWT認証 ---
+
+// jwtClaims はJWTのペイロード構造体
+type jwtClaims struct {
+	UserID       uint   `json:"user_id"`
+	Email        string `json:"email"`
+	Role         string `json:"role"`
+	DepartmentID *uint  `json:"department_id"`
+	Exp          int64  `json:"exp"`
+}
+
+// base64urlEncode はRFC 4648 §5のbase64url（パディングなし）エンコード
+func base64urlEncode(data []byte) string {
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+// generateToken はHS256署名のJWTを生成する
+func generateToken(user User) (string, error) {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		return "", fmt.Errorf("JWT_SECRET environment variable is not set")
+	}
+
+	// Header
+	headerJSON, _ := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
+	header := base64urlEncode(headerJSON)
+
+	// Payload
+	claims := jwtClaims{
+		UserID:       user.ID,
+		Email:        user.Email,
+		Role:         user.Role,
+		DepartmentID: user.DepartmentID,
+		Exp:          time.Now().Add(24 * time.Hour).Unix(),
+	}
+	payloadJSON, _ := json.Marshal(claims)
+	payload := base64urlEncode(payloadJSON)
+
+	// Signature
+	signingInput := header + "." + payload
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(signingInput))
+	sig := base64urlEncode(mac.Sum(nil))
+
+	return signingInput + "." + sig, nil
+}
+
+// verifyToken はJWTを検証してclaimsを返す
+func verifyToken(tokenStr string) (*jwtClaims, error) {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		return nil, fmt.Errorf("JWT_SECRET environment variable is not set")
+	}
+
+	parts := strings.Split(tokenStr, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid token format")
+	}
+
+	// 署名を検証
+	signingInput := parts[0] + "." + parts[1]
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(signingInput))
+	expectedSig := base64urlEncode(mac.Sum(nil))
+	if !hmac.Equal([]byte(parts[2]), []byte(expectedSig)) {
+		return nil, fmt.Errorf("invalid token signature")
+	}
+
+	// ペイロードをデコード
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid token payload")
+	}
+
+	var claims jwtClaims
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return nil, fmt.Errorf("failed to parse token payload")
+	}
+
+	// 有効期限チェック
+	if time.Now().Unix() > claims.Exp {
+		return nil, fmt.Errorf("token expired")
+	}
+
+	return &claims, nil
+}
+
+// AuthMiddleware はBearerトークンを検証してContextにユーザー情報をセットする
+func AuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "認証トークンがありません"})
+			return
+		}
+
+		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+		claims, err := verifyToken(tokenStr)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "無効なトークンです: " + err.Error()})
+			return
+		}
+
+		c.Set("user_id", claims.UserID)
+		c.Set("role", claims.Role)
+		c.Set("department_id", claims.DepartmentID)
+		c.Next()
+	}
+}
+
+// RequireRole は指定ロールを持つユーザーのみ通過を許可する（AuthMiddlewareの後に使う）
+func RequireRole(roles ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		role, _ := c.Get("role")
+		roleStr, _ := role.(string)
+		for _, r := range roles {
+			if r == roleStr {
+				c.Next()
+				return
+			}
+		}
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "この操作を行う権限がありません"})
+	}
+}
+
+// --- 認証ハンドラー ---
+
+func loginHandler(c *gin.Context) {
+	var input struct {
+		Email    string `json:"email" binding:"required"`
+		Password string `json:"password" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var user User
+	if err := db.Where("email = ? AND is_active = ?", input.Email, true).First(&user).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "メールアドレスまたはパスワードが正しくありません"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "メールアドレスまたはパスワードが正しくありません"})
+		return
+	}
+
+	token, err := generateToken(user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "トークンの生成に失敗しました"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"token": token,
+		"user": gin.H{
+			"id":            user.ID,
+			"name":          user.Name,
+			"email":         user.Email,
+			"role":          user.Role,
+			"department_id": user.DepartmentID,
+		},
+	})
+}
+
+func meHandler(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	var user User
+	if err := db.First(&user, userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "ユーザーが見つかりません"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"id":            user.ID,
+		"name":          user.Name,
+		"email":         user.Email,
+		"role":          user.Role,
+		"department_id": user.DepartmentID,
+	})
 }
 
 func seedDefaultFolders() {
@@ -139,30 +400,220 @@ func seedDefaultFolders() {
 	}
 }
 
+func seedAdminUser() {
+	var count int64
+	db.Model(&User{}).Count(&count)
+	if count > 0 {
+		return
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte("admin1234"), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("管理者ユーザーのパスワードハッシュ化に失敗しました: %v", err)
+		return
+	}
+	admin := User{
+		Name:     "システム管理者",
+		Email:    "admin@example.com",
+		Password: string(hashed),
+		Role:     "legal_manager",
+		IsActive: true,
+	}
+	if err := db.Create(&admin).Error; err != nil {
+		log.Printf("管理者ユーザーの作成に失敗しました: %v", err)
+		return
+	}
+	log.Println("初期管理者ユーザー (admin@example.com) を作成しました")
+}
+
+// --- 部署ハンドラー ---
+
+func getDepartmentsHandler(c *gin.Context) {
+	var departments []Department
+	if err := db.Find(&departments).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "部署の取得に失敗しました"})
+		return
+	}
+	c.JSON(http.StatusOK, departments)
+}
+
+func createDepartmentHandler(c *gin.Context) {
+	var dept Department
+	if err := c.ShouldBindJSON(&dept); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := db.Create(&dept).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "部署の作成に失敗しました"})
+		return
+	}
+	c.JSON(http.StatusCreated, dept)
+}
+
+func updateDepartmentHandler(c *gin.Context) {
+	id := c.Param("id")
+	var dept Department
+	if err := db.First(&dept, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "部署が見つかりません"})
+		return
+	}
+	var input map[string]interface{}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := db.Model(&dept).Updates(input).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "部署の更新に失敗しました"})
+		return
+	}
+	db.First(&dept, id)
+	c.JSON(http.StatusOK, dept)
+}
+
+// --- ユーザーハンドラー ---
+
+func getUsersHandler(c *gin.Context) {
+	var users []User
+	if err := db.Find(&users).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ユーザーの取得に失敗しました"})
+		return
+	}
+	c.JSON(http.StatusOK, users)
+}
+
+func createUserHandler(c *gin.Context) {
+	var input struct {
+		Name         string `json:"name" binding:"required"`
+		Email        string `json:"email" binding:"required"`
+		Password     string `json:"password" binding:"required"`
+		Role         string `json:"role" binding:"required"`
+		DepartmentID *uint  `json:"department_id"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "パスワードのハッシュ化に失敗しました"})
+		return
+	}
+
+	user := User{
+		Name:         input.Name,
+		Email:        input.Email,
+		Password:     string(hashed),
+		Role:         input.Role,
+		DepartmentID: input.DepartmentID,
+		IsActive:     true,
+	}
+	if err := db.Create(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ユーザーの作成に失敗しました"})
+		return
+	}
+	c.JSON(http.StatusCreated, user)
+}
+
+func updateUserHandler(c *gin.Context) {
+	id := c.Param("id")
+	var target User
+	if err := db.First(&target, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "ユーザーが見つかりません"})
+		return
+	}
+
+	callerRole, _ := c.Get("role")
+	callerRoleStr, _ := callerRole.(string)
+	callerID, _ := c.Get("user_id")
+	callerIDUint, _ := callerID.(uint)
+
+	var input map[string]interface{}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// legal_manager 以外が自分以外を更新しようとした場合は禁止
+	if callerRoleStr != "legal_manager" && callerIDUint != target.ID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "他のユーザーを更新する権限がありません"})
+		return
+	}
+
+	// legal_manager 以外は name と password 以外の変更を禁止
+	if callerRoleStr != "legal_manager" {
+		for key := range input {
+			if key != "name" && key != "password" {
+				delete(input, key)
+			}
+		}
+	}
+
+	// password が含まれる場合は bcrypt ハッシュ化
+	if pw, ok := input["password"].(string); ok && pw != "" {
+		hashed, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "パスワードのハッシュ化に失敗しました"})
+			return
+		}
+		input["password"] = string(hashed)
+	} else {
+		delete(input, "password")
+	}
+
+	if err := db.Model(&target).Updates(input).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ユーザーの更新に失敗しました"})
+		return
+	}
+	db.First(&target, id)
+	c.JSON(http.StatusOK, target)
+}
+
 func setupRouter() *gin.Engine {
 	r := gin.Default()
 
-	// 追加：同じフォルダにある静的ファイル（HTMLなど）を使えるようにする
+	// 静的ファイル
 	r.StaticFile("/", "./index.html")
 	r.StaticFile("/index.html", "./index.html")
 	r.StaticFile("/contract_detail.html", "./contract_detail.html")
-	r.Static("/uploads", "./uploads") // アップロードされたファイルへのアクセスを許可
+	r.Static("/uploads", "./uploads")
 
-	// ルーティング
+	// 認証不要エンドポイント
 	r.GET("/hello", helloHandler)
-	r.GET("/contracts", getContractsHandler)
-	r.GET("/contracts/:id", getContractDetailHandler)
-	r.POST("/contracts", createContractHandler)
-	r.DELETE("/contracts/:id", deleteContractHandler)
-	r.PUT("/contracts/:id", updateContractHandler)
-	r.POST("/api/analyze", analyzeContractHandler)
-	r.POST("/contracts/:id/analyze", reanalyzeContractHandler)
+	r.POST("/auth/login", loginHandler)
 
-	// フォルダ関連のルーティング
-	r.GET("/folders", getFoldersHandler)
-	r.POST("/folders", createFolderHandler)
-	r.PUT("/folders/:id", updateFolderHandler)
-	r.DELETE("/folders/:id", deleteFolderHandler)
+	// 認証必須エンドポイント
+	auth := r.Group("/", AuthMiddleware())
+	{
+		auth.POST("/auth/me", meHandler)
+
+		// 契約関連
+		auth.GET("/contracts", getContractsHandler)
+		auth.GET("/contracts/:id", getContractDetailHandler)
+		auth.POST("/contracts", createContractHandler)
+		auth.DELETE("/contracts/:id", deleteContractHandler)
+		auth.PUT("/contracts/:id", updateContractHandler)
+		auth.POST("/contracts/:id/analyze", reanalyzeContractHandler)
+
+		// AI解析
+		auth.POST("/api/analyze", analyzeContractHandler)
+
+		// フォルダ関連
+		auth.GET("/folders", getFoldersHandler)
+		auth.POST("/folders", createFolderHandler)
+		auth.PUT("/folders/:id", updateFolderHandler)
+		auth.DELETE("/folders/:id", deleteFolderHandler)
+
+		// 部署関連（GET は全ロール可、POST/PUT は legal_manager のみ）
+		auth.GET("/departments", getDepartmentsHandler)
+		auth.POST("/departments", RequireRole("legal_manager"), createDepartmentHandler)
+		auth.PUT("/departments/:id", RequireRole("legal_manager"), updateDepartmentHandler)
+
+		// ユーザー関連（GET/POST は legal_manager のみ、PUT は権限チェックをハンドラー内で行う）
+		auth.GET("/users", RequireRole("legal_manager"), getUsersHandler)
+		auth.POST("/users", RequireRole("legal_manager"), createUserHandler)
+		auth.PUT("/users/:id", updateUserHandler)
+	}
 
 	return r
 }
