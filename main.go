@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/smtp"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,6 +75,113 @@ func userName(id uint) string {
 		return ""
 	}
 	return u.Name
+}
+
+// userEmail は ID からメールアドレスを取得する（取得失敗時は空文字）。
+func userEmail(id uint) string {
+	var u User
+	if err := db.Select("email").First(&u, id).Error; err != nil {
+		return ""
+	}
+	return u.Email
+}
+
+// legalManagerEmails は role='legal_manager' の全アクティブユーザーのメールアドレスを返す。
+func legalManagerEmails() []string {
+	var users []User
+	db.Select("email").Where("role = ? AND is_active = ?", "legal_manager", true).Find(&users)
+	emails := make([]string, 0, len(users))
+	for _, u := range users {
+		if u.Email != "" {
+			emails = append(emails, u.Email)
+		}
+	}
+	return emails
+}
+
+// --- メール通知 ---
+
+// smtpCfg は起動時に環境変数から初期化する SMTP 設定。
+var smtpCfg struct {
+	host     string
+	port     string
+	user     string
+	password string
+	from     string
+}
+
+// sendEmailNotification は STARTTLS で SMTP サーバーに接続してメールを送信する。
+// 設定が不完全な場合はスキップする。goroutine で呼ぶこと。
+func sendEmailNotification(to, subject, body string) error {
+	if smtpCfg.host == "" || smtpCfg.port == "" || smtpCfg.user == "" {
+		log.Println("SMTP not configured, skipping email")
+		return nil
+	}
+	addr := smtpCfg.host + ":" + smtpCfg.port
+
+	msg := "From: " + smtpCfg.from + "\r\n" +
+		"To: " + to + "\r\n" +
+		"Subject: " + subject + "\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: text/plain; charset=UTF-8\r\n" +
+		"\r\n" +
+		body
+
+	// STARTTLS
+	conn, err := smtp.Dial(addr)
+	if err != nil {
+		return fmt.Errorf("smtp dial: %w", err)
+	}
+	defer conn.Close()
+
+	if ok, _ := conn.Extension("STARTTLS"); ok {
+		tlsCfg := &tls.Config{ServerName: smtpCfg.host}
+		if err := conn.StartTLS(tlsCfg); err != nil {
+			return fmt.Errorf("smtp starttls: %w", err)
+		}
+	}
+
+	auth := smtp.PlainAuth("", smtpCfg.user, smtpCfg.password, smtpCfg.host)
+	if err := conn.Auth(auth); err != nil {
+		return fmt.Errorf("smtp auth: %w", err)
+	}
+	if err := conn.Mail(smtpCfg.user); err != nil {
+		return fmt.Errorf("smtp mail: %w", err)
+	}
+	if err := conn.Rcpt(to); err != nil {
+		return fmt.Errorf("smtp rcpt: %w", err)
+	}
+	wc, err := conn.Data()
+	if err != nil {
+		return fmt.Errorf("smtp data: %w", err)
+	}
+	if _, err := fmt.Fprint(wc, msg); err != nil {
+		return fmt.Errorf("smtp write: %w", err)
+	}
+	return wc.Close()
+}
+
+// notifyEmail は to が空でなければ goroutine でメール送信する。
+func notifyEmail(to, subject, body string) {
+	if smtpCfg.host == "" {
+		log.Println("SMTP_HOST not set, skipping email")
+		return
+	}
+	if to == "" {
+		return
+	}
+	go func() {
+		if err := sendEmailNotification(to, subject, body); err != nil {
+			log.Printf("email notification error (to=%s): %v", to, err)
+		}
+	}()
+}
+
+// notifyEmailMulti は複数の宛先に対してそれぞれ goroutine で送信する。
+func notifyEmailMulti(toList []string, subject, body string) {
+	for _, to := range toList {
+		notifyEmail(to, subject, body)
+	}
 }
 
 // 定数定義
@@ -146,12 +255,85 @@ type Contract struct {
 	ReviewVersion int        `gorm:"column:review_version;default:0" json:"review_version"`
 }
 
+// --- 契約期限アラートジョブ ---
+
+func runDeadlineAlerts() {
+	now := time.Now()
+
+	// ① 審査期限アラート: due_date が今日〜3日後で未完了の契約
+	deadline3 := now.Add(3 * 24 * time.Hour)
+	var dueSoonContracts []Contract
+	db.Where("status NOT IN ? AND due_date IS NOT NULL AND due_date >= ? AND due_date <= ?",
+		[]string{"approved", "rejected"}, now, deadline3).
+		Find(&dueSoonContracts)
+
+	lmEmails := legalManagerEmails() // 一度だけ取得して再利用
+	for _, c := range dueSoonContracts {
+		days := int(c.DueDate.Sub(now).Hours() / 24)
+		msg := fmt.Sprintf("【期限アラート】%s の審査期限まであと%d日です。", c.Title, days)
+		subject := fmt.Sprintf("【期限アラート】%s", c.Title)
+		notifySlack(msg)
+		if c.AssigneeID != nil {
+			notifyEmail(userEmail(*c.AssigneeID), subject, msg)
+		}
+		notifyEmailMulti(lmEmails, subject, msg)
+	}
+
+	// ② 契約終了アラート: status=approved かつ end_date が今日〜30日後
+	// end_date は YYYY-MM-DD 文字列なので辞書順比較が成立する
+	today := now.Format("2006-01-02")
+	limit30 := now.Add(30 * 24 * time.Hour).Format("2006-01-02")
+	var endingSoonContracts []Contract
+	db.Where("status = ? AND end_date != '' AND end_date >= ? AND end_date <= ?",
+		"approved", today, limit30).
+		Find(&endingSoonContracts)
+
+	for _, c := range endingSoonContracts {
+		endDate, err := time.Parse("2006-01-02", c.EndDate)
+		if err != nil {
+			continue
+		}
+		days := int(endDate.Sub(now).Hours() / 24)
+		autoRenewal := "なし"
+		if c.AutoRenewal {
+			autoRenewal = "あり"
+		}
+		msg := fmt.Sprintf("【契約終了アラート】%s の契約終了まであと%d日です。自動更新: %s",
+			c.Title, days, autoRenewal)
+		subject := fmt.Sprintf("【契約終了アラート】%s", c.Title)
+		notifySlack(msg)
+		if c.RequesterID != nil {
+			notifyEmail(userEmail(*c.RequesterID), subject, msg)
+		}
+		notifyEmailMulti(lmEmails, subject, msg)
+	}
+}
+
+// startDeadlineAlertJob は起動直後に一度実行した後、24時間ごとに期限アラートをチェックする。
+// main() から go startDeadlineAlertJob() で呼び出すこと。
+func startDeadlineAlertJob() {
+	runDeadlineAlerts()
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		runDeadlineAlerts()
+	}
+}
+
 func main() {
 	// .envファイルを読み込む（存在する場合）
 	loadEnv()
 	initDB()
 	ensureUploadsDir()
 	slackWebhookURL = os.Getenv("SLACK_WEBHOOK_URL")
+	smtpCfg.host = os.Getenv("SMTP_HOST")
+	smtpCfg.port = os.Getenv("SMTP_PORT")
+	smtpCfg.user = os.Getenv("SMTP_USER")
+	smtpCfg.password = os.Getenv("SMTP_PASSWORD")
+	smtpCfg.from = os.Getenv("SMTP_FROM")
+	if smtpCfg.from == "" {
+		smtpCfg.from = smtpCfg.user
+	}
 
 	r := setupRouter()
 
@@ -159,6 +341,7 @@ func main() {
 	if port == "" {
 		port = defaultPort
 	}
+	go startDeadlineAlertJob()
 	log.Printf("Server is running on port %s", port)
 	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
@@ -1155,15 +1338,20 @@ func submitContractHandler(c *gin.Context) {
 
 	db.First(&contract, id)
 
-	// Slack通知（submit）: アサインされた法務担当者へ
+	// 通知（submit）: アサインされた法務担当者へ
 	{
 		requesterName := userName(callerIDUint)
 		dueDateStr := ""
 		if contract.DueDate != nil {
 			dueDateStr = contract.DueDate.Format("2006-01-02")
 		}
-		notifySlack(fmt.Sprintf("【新規審査依頼】%s の審査依頼が届きました。依頼者: %s 希望期限: %s",
-			contract.Title, requesterName, dueDateStr))
+		msg := fmt.Sprintf("【新規審査依頼】%s の審査依頼が届きました。依頼者: %s 希望期限: %s",
+			contract.Title, requesterName, dueDateStr)
+		notifySlack(msg)
+		if contract.AssigneeID != nil {
+			notifyEmail(userEmail(*contract.AssigneeID),
+				fmt.Sprintf("【審査依頼】%s", contract.Title), msg)
+		}
 	}
 
 	c.JSON(http.StatusOK, contract)
@@ -1204,9 +1392,16 @@ func acceptContractHandler(c *gin.Context) {
 
 	db.First(&contract, id)
 
-	// Slack通知（accept）: 依頼者へ
-	notifySlack(fmt.Sprintf("【受付完了】%s の審査を受け付けました。担当: %s",
-		contract.Title, userName(callerIDUint)))
+	// 通知（accept）: 依頼者へ
+	{
+		msg := fmt.Sprintf("【受付完了】%s の審査を受け付けました。担当: %s",
+			contract.Title, userName(callerIDUint))
+		notifySlack(msg)
+		if contract.RequesterID != nil {
+			notifyEmail(userEmail(*contract.RequesterID),
+				fmt.Sprintf("【受付完了】%s", contract.Title), msg)
+		}
+	}
 
 	c.JSON(http.StatusOK, contract)
 }
@@ -1288,9 +1483,14 @@ func requestApprovalContractHandler(c *gin.Context) {
 
 	db.First(&contract, id)
 
-	// Slack通知（request_approval）: 法務マネージャーへ
-	notifySlack(fmt.Sprintf("【承認依頼】%s の最終承認をお願いします。担当: %s",
-		contract.Title, userName(callerIDUint)))
+	// 通知（request_approval）: 法務マネージャーへ
+	{
+		msg := fmt.Sprintf("【承認依頼】%s の最終承認をお願いします。担当: %s",
+			contract.Title, userName(callerIDUint))
+		notifySlack(msg)
+		notifyEmailMulti(legalManagerEmails(),
+			fmt.Sprintf("【承認依頼】%s", contract.Title), msg)
+	}
 
 	c.JSON(http.StatusOK, contract)
 }
@@ -1326,8 +1526,18 @@ func approveContractHandler(c *gin.Context) {
 
 	db.First(&contract, id)
 
-	// Slack通知（approve）: 依頼者 + 担当法務へ
-	notifySlack(fmt.Sprintf("【承認完了】%s が承認されました。", contract.Title))
+	// 通知（approve）: 依頼者 + 担当法務へ
+	{
+		msg := fmt.Sprintf("【承認完了】%s が承認されました。", contract.Title)
+		notifySlack(msg)
+		subject := fmt.Sprintf("【承認完了】%s", contract.Title)
+		if contract.RequesterID != nil {
+			notifyEmail(userEmail(*contract.RequesterID), subject, msg)
+		}
+		if contract.AssigneeID != nil {
+			notifyEmail(userEmail(*contract.AssigneeID), subject, msg)
+		}
+	}
 
 	c.JSON(http.StatusOK, contract)
 }
@@ -1375,9 +1585,17 @@ func rejectContractHandler(c *gin.Context) {
 
 	db.First(&contract, id)
 
-	// Slack通知（reject）: 依頼者 + 法務マネージャーへ
-	notifySlack(fmt.Sprintf("【差し戻し】%s が差し戻されました。理由: %s",
-		contract.Title, input.Comment))
+	// 通知（reject）: 依頼者 + 法務マネージャーへ
+	{
+		msg := fmt.Sprintf("【差し戻し】%s が差し戻されました。理由: %s",
+			contract.Title, input.Comment)
+		notifySlack(msg)
+		subject := fmt.Sprintf("【差し戻し】%s", contract.Title)
+		if contract.RequesterID != nil {
+			notifyEmail(userEmail(*contract.RequesterID), subject, msg)
+		}
+		notifyEmailMulti(legalManagerEmails(), subject, msg)
+	}
 
 	c.JSON(http.StatusOK, contract)
 }
